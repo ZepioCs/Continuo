@@ -1,10 +1,10 @@
 # Continuo
 
-Token-aware persistent memory and procedural knowledge server for AI agents. Built as an MCP (Model Context Protocol) server with zero external dependencies.
+Token-aware persistent memory and procedural knowledge server for AI agents. Built as an MCP server using pure TypeScript — the only runtime dependency is the MCP SDK itself.
 
 ## Why Continuo
 
-AI assistants lose context between conversations. RAG systems retrieve irrelevant documents. Prompt-based memory management wastes tokens. Continuo solves these problems with a retrieval layer that understands **temporal recency**, **knowledge versioning**, and **semantic associations** - without embeddings, without vector databases, without API keys.
+AI assistants lose context between conversations. RAG systems retrieve irrelevant documents. Prompt-based memory management wastes tokens. Continuo provides a retrieval layer that understands **temporal recency**, **knowledge versioning**, and **semantic associations** — using TF-IDF instead of embeddings, JSONL files instead of a database, and a single runtime dependency instead of a stack.
 
 ## Architecture
 
@@ -39,19 +39,19 @@ AI assistants lose context between conversations. RAG systems retrieve irrelevan
 
 ## Search Engine
 
-The semantic search engine is the core differentiator. It's a pure TF-IDF system augmented with three techniques inspired by human memory:
+TF-IDF with cosine similarity, augmented with three techniques:
 
 ### Temporal Awareness
 
-Queries like "What does the user currently live?" or "What is the latest API rate limit?" trigger temporal scoring that promotes recent/updated fragments over older ones. This works by detecting temporal intent markers ("current", "latest", specific years), then boosting fragments with freshness signals (tags like "updated", recent year mentions, higher version numbers).
+Queries like "What does the user currently live?" or "What is the latest API rate limit?" trigger temporal scoring that promotes recent/updated fragments. Detects temporal intent markers ("current", "latest", specific years) and boosts fragments with freshness signals.
 
 ### Version Conflict Detection
 
-When multiple fragments share a base title (e.g., "API Rate Limit - Original" and "API Rate Limit - Updated"), the system detects the conflict and demotes unmarked versions while promoting marked ones. This ensures knowledge updates surface correctly even when queries don't contain explicit temporal words.
+When multiple fragments share a base title (e.g., "API Rate Limit - Original" and "API Rate Limit - Updated"), the system demotes unmarked versions and promotes marked ones.
 
-### Co-occurrence Expansion (Spreading Activation)
+### Co-occurrence Expansion
 
-Inspired by associative memory in biological neural networks. The system builds a PMI-weighted term-term association matrix from the indexed corpus. When a query has weak TF-IDF matches (raw score < 0.5), the query is automatically expanded with associated terms. For example, "programming language" activates associations to "PHP", "TypeScript", "backend" based on corpus co-occurrence patterns.
+PMI-weighted term-term associations built from the indexed corpus. When TF-IDF scores are weak (< 0.5), the query is expanded with associated terms.
 
 ## Benchmark Results
 
@@ -71,6 +71,22 @@ Evaluated against LongMemEval (ICLR 2025) and LoCoMo (ACL 2024) retrieval tracks
 
 Reference: LongMemEval reports BM25 retrieval R@5 at ~65-75% (session-level) and dense retrieval R@5 at ~70-80%.
 
+## Limitations
+
+- **TF-IDF, not embeddings** — Search relies on term overlap, not semantic understanding. "Where does the user live?" won't match a fragment containing "residence" unless the term appears. This is the main tradeoff for zero-dependency search. Embeddings would significantly improve recall but require an external model.
+
+- **JSONL file storage** — Every read/write scans or rewrites the entire file. Works well for hundreds of fragments. Performance will degrade with thousands. No indexing beyond what's loaded into memory.
+
+- **Single-process only** — The in-memory cache means one MCP server instance per storage directory. Multiple clients writing to the same `~/.continuo/` will have stale caches.
+
+- **Plaintext storage** — Fragments are stored as readable JSONL. Don't store passwords, API keys, or other sensitive data.
+
+- **Abstention doesn't work** — R@1 for the abstention benchmark is 0%. The system returns results when it should return nothing. This is a fundamental limitation of the scoring approach — there's no confidence threshold below which the system refuses to answer.
+
+- **Knowledge Updates R@1 is 60%** — When content has multiple versions, the updated version doesn't always rank first. Temporal boosting helps but doesn't fully solve this.
+
+- **Query history grows unbounded** — `query-history.jsonl` accumulates every search forever. No automatic cleanup.
+
 ## Installation
 
 ```bash
@@ -78,9 +94,11 @@ cd /path/to/continuo
 bun install
 ```
 
+Runtime dependency: `@modelcontextprotocol/sdk`. Dev dependencies: TypeScript, Biome (linter). That's it.
+
 ## Configuration
 
-Add to Claude Desktop config (`claude_desktop_config.json`):
+Add to your MCP client config:
 
 ```json
 {
@@ -164,7 +182,7 @@ Add to Claude Desktop config (`claude_desktop_config.json`):
 
 ### Token Budget Awareness
 
-Fragments are selected to fit within a token budget. Critical-priority fragments are always included. Normal-priority fragments are ranked by relevance and fit greedily until the budget is exhausted.
+Fragments are selected to fit within a token budget. Critical-priority fragments are always included. High-priority fragments get a 50% budget discount. Low-priority fragments cost 200%.
 
 ```json
 {
@@ -175,7 +193,7 @@ Fragments are selected to fit within a token budget. Critical-priority fragments
 
 ### Project Inheritance
 
-Fragments can inherit context from parent projects, enabling shared configuration across related services:
+Fragments can inherit context from parent projects:
 
 ```json
 {
@@ -192,16 +210,20 @@ Fragments can inherit context from parent projects, enabling shared configuratio
 
 ### Priority System
 
-Four priority levels control which fragments survive budget cuts:
+Four levels control which fragments survive budget cuts:
 
-- **critical** - Always included regardless of budget
-- **high** - Included after critical fragments
-- **normal** - Included by relevance ranking
-- **low** - First to be dropped when budget is tight
+- **critical** — Always included, zero budget cost
+- **high** — 50% budget cost
+- **normal** — Full budget cost
+- **low** — 200% budget cost, first to be dropped
+
+### Fragment Versioning
+
+When a fragment is updated (via dedup merge or manual update), the previous content is saved. Up to 10 versions kept per fragment. Query with `memory_history` to see what the AI knew at a given point in time.
 
 ### Procedural Knowledge (Guides)
 
-Guides store reusable patterns and workflows. Unlike fragments (facts), guides track how often they're used and accumulate learnings over time:
+Guides store reusable patterns and workflows. Unlike fragments (facts), guides track usage and accumulate learnings:
 
 ```json
 {
@@ -211,42 +233,6 @@ Guides store reusable patterns and workflows. Unlike fragments (facts), guides t
   "contexts": ["readonly", "immutability"],
   "learnings": ["Use readonly arrays for immutable data"]
 }
-```
-
-## Usage
-
-### Start of Session
-
-```json
-// Load context from memory
-memory_read({"tokenBudget": 4000})
-// Find relevant procedural knowledge
-guide_suggest({"task": "building React components"})
-```
-
-### During Session
-
-```json
-// Store important discoveries
-memory_add({
-  "fragment": "The user prefers dark mode and Tab for indentation.",
-  "priority": "high",
-  "tags": ["preference", "ui"]
-})
-
-// Search across stored knowledge
-search_semantic({"query": "authentication flow"})
-```
-
-### End of Session
-
-```json
-// Record learnings
-guide_practice({
-  "guide": "typescript",
-  "contexts": ["readonly", "generics"],
-  "learnings": ["User prefers explicit return types on public methods"]
-})
 ```
 
 ## Development
@@ -264,13 +250,13 @@ continuo/
 ├── src/
 │   ├── index.ts              # MCP server entry point
 │   ├── core/
-│   │   ├── types.ts          # Memory fragment and guide types
+│   │   ├── types.ts          # Types for fragments, guides, sessions
 │   │   ├── storage.ts        # Atomic JSONL file storage
-│   │   ├── memory.ts         # Fragment CRUD with token budgets
+│   │   ├── memory.ts         # Fragment CRUD, versioning, query tracking
 │   │   ├── guides.ts         # Guide CRUD with usage tracking
 │   │   ├── sessions.ts       # Session lifecycle and caching
 │   │   ├── context.ts        # Token-aware fragment selection
-│   │   ├── prioritization.ts # Priority scoring and auto-promotion
+│   │   ├── prioritization.ts # Priority scoring and confidence decay
 │   │   ├── semantic.ts       # TF-IDF + temporal + co-occurrence search
 │   │   └── streaming.ts      # Response streaming utilities
 │   ├── server/
@@ -284,7 +270,11 @@ continuo/
 │   ├── index.test.ts          # Integration tests
 │   └── guides.test.ts        # Guide manager tests
 ├── package.json
-└── tsconfig.json
+├── tsconfig.json
+├── biome.json
+├── LICENSE
+├── README.md
+└── ROADMAP.md
 ```
 
 ## Storage
@@ -293,7 +283,7 @@ All data is stored in `~/.continuo/`:
 
 | File | Format | Content |
 |------|--------|---------|
-| `fragments.jsonl` | JSONL | Memory fragments |
+| `fragments.jsonl` | JSONL | Memory fragments (with version history) |
 | `guides.jsonl` | JSONL | Procedural knowledge guides |
 | `sessions.json` | JSON | Active session state |
 | `query-history.jsonl` | JSONL | Search query history |

@@ -56,20 +56,35 @@ Continuo is a token-aware persistent memory MCP server for AI agents. It provide
 
 ## Technical Constraints
 
-- Zero external dependencies (pure TypeScript/Bun)
+- One runtime dependency: `@modelcontextprotocol/sdk` (required for MCP protocol)
 - JSONL file storage (no SQLite, no Redis)
 - MCP protocol only (no HTTP endpoints)
 - 60 tests, all passing
+- Single-process only (in-memory cache)
+
+## Known Limitations
+
+| Area | Issue | Impact |
+|------|-------|--------|
+| Search | TF-IDF can't capture synonyms or semantic meaning beyond term overlap | "Where does the user live?" won't match "residence" |
+| Abstention | No confidence threshold to refuse answering | Returns results when it should return nothing (R@1 = 0%) |
+| Knowledge Updates | Updated content doesn't always rank first | R@1 = 60%, temporal boost helps but isn't sufficient |
+| Storage | JSONL scan on every operation | Degrades with 1000+ fragments |
+| Scale | In-memory cache is per-process | Multiple MCP clients can't share a cache |
+| Security | Plaintext JSONL storage | Don't store secrets |
+| Query history | Grows unbounded | No automatic cleanup for query-history.jsonl |
 
 ## Future Directions
 
 ### Short-term Improvements
 - **Semantic memory_read Integration** — Full semantic engine ranking instead of just priority-based selection
+- **Abstention threshold** — Add a minimum confidence score below which the system returns no results
+- **Query history cleanup** — Auto-prune queries older than 30 days
 
 ### Long-term Vision
+- **Optional embeddings backend** — Pluggable embedding provider for semantic search (would be opt-in, keeping zero-dependency as default)
 - **Adaptive Token Budgets** — Learn optimal budgets per project/task type
 - **Cross-agent Memory Sharing** — Share memory between different AI agent instances
-- **Plugin Architecture** — Allow custom extraction patterns and scoring functions
 
 ---
 
