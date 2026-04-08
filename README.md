@@ -113,8 +113,17 @@ Add to Claude Desktop config (`claude_desktop_config.json`):
 | `memory_add_batch` | Store multiple fragments in one operation |
 | `memory_update` | Update an existing fragment |
 | `memory_delete` | Delete a fragment by ID |
+| `memory_delete_batch` | Delete multiple fragments in one operation |
 | `memory_list` | List fragments with optional filtering |
-| `memory_compress` | Compress similar low-priority fragments |
+| `memory_compress` | Compress similar low-priority fragments (non-destructive) |
+| `memory_undo` | Restore last compressed fragments |
+| `memory_export` | Export all fragments as JSON |
+| `memory_import` | Import fragments from JSON |
+| `memory_stats` | Memory health statistics |
+| `memory_extract` | Extract storeable facts from raw text |
+| `memory_suggest` | Proactive suggestions based on memory state |
+| `memory_history` | View version history for a fragment |
+| `memory_queries` | View search query history and patterns |
 
 ### Guides (Procedural Knowledge)
 
@@ -142,6 +151,7 @@ Add to Claude Desktop config (`claude_desktop_config.json`):
 | `session_get` | Get session info and cached context |
 | `session_delta` | Get differential updates since last turn |
 | `session_close` | Close session and cleanup |
+| `session_update` | Update session context and conversation summary |
 
 ### Priority
 
@@ -271,7 +281,7 @@ continuo/
 │       ├── compression.ts    # Fragment compression
 │       └── logging.ts        # Structured logging
 ├── tests/
-│   ├── memory.test.ts        # Memory manager tests
+│   ├── index.test.ts          # Integration tests
 │   └── guides.test.ts        # Guide manager tests
 ├── package.json
 └── tsconfig.json
@@ -286,6 +296,7 @@ All data is stored in `~/.continuo/`:
 | `fragments.jsonl` | JSONL | Memory fragments |
 | `guides.jsonl` | JSONL | Procedural knowledge guides |
 | `sessions.json` | JSON | Active session state |
+| `query-history.jsonl` | JSONL | Search query history |
 
 ## License
 
