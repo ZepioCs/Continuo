@@ -12,10 +12,12 @@ import { SessionManager } from "./sessions.js";
 import { AtomicStorage, JsonlStorage } from "./storage.js";
 import type {
   ContextRequest,
+  FragmentVersion,
   MemoryAddParams,
   MemoryFragment,
   MemoryUpdateParams,
   Priority,
+  QueryRecord,
   RawMemoryFragment,
   SelectionResult,
 } from "./types.js";
@@ -45,6 +47,7 @@ export interface MemoryManagerOptions {
 export class MemoryManager {
   readonly storage: AtomicStorage;
   readonly fragmentStore: JsonlStorage<RawMemoryFragment>;
+  readonly queryStore: JsonlStorage<QueryRecord>;
   readonly sessionManager: SessionManager;
   readonly contextSelector: ContextSelector;
   readonly prioritizer: Prioritizer;
@@ -56,6 +59,7 @@ export class MemoryManager {
   constructor(options: MemoryManagerOptions = {}) {
     this.storage = new AtomicStorage({ basePath: options.storagePath ?? "~/.continuo" });
     this.fragmentStore = new JsonlStorage<RawMemoryFragment>(this.storage, "fragments.jsonl");
+    this.queryStore = new JsonlStorage<QueryRecord>(this.storage, "query-history.jsonl");
     this.sessionManager = new SessionManager(this.storage, options.sessionTtl, options.maxSessions);
     this.semanticSearch = options.semanticSearch ?? null;
     this.prioritizer = new Prioritizer(undefined, this.semanticSearch ?? undefined);
@@ -128,6 +132,7 @@ export class MemoryManager {
         priority: params.priority ?? (existing.priority as Priority),
         confidence: params.confidence ?? existing.confidence,
         tags: params.tags?.length ? params.tags : [...existing.tags],
+        versionReason: "dedup_merge",
       });
       logger.debug("Updated duplicate instead of adding new", {
         existingId: existing.id,
@@ -156,6 +161,7 @@ export class MemoryManager {
       tags: params.tags ?? [],
       expiresAt,
       parentFragmentId: params.parentFragmentId ?? null,
+      versionHistory: [],
     };
 
     await this.fragmentStore.append(toRaw(fragment));
@@ -193,6 +199,7 @@ export class MemoryManager {
 
   /**
    * Update an existing fragment.
+   * Stores previous content in version history before overwriting.
    */
   async update(params: MemoryUpdateParams): Promise<MemoryFragment | null> {
     let updated: RawMemoryFragment | null = null;
@@ -200,6 +207,27 @@ export class MemoryManager {
     await this.fragmentStore.update(
       (f) => f.id === params.id,
       (f) => {
+        const existingHistory: readonly FragmentVersion[] =
+          (f as { versionHistory?: readonly FragmentVersion[] }).versionHistory ?? [];
+        const hasContentChange = params.fragment !== undefined && params.fragment !== f.fragment;
+
+        // Snapshot current state before overwriting
+        let newHistory = existingHistory;
+        if (hasContentChange) {
+          const snapshot: FragmentVersion = {
+            fragment: f.fragment,
+            title: f.title,
+            description: f.description,
+            updatedAt: new Date().toISOString(),
+            changeReason: params.versionReason ?? "manual_update",
+          };
+          newHistory = [...existingHistory, snapshot];
+          // Keep last 10 versions max
+          if (newHistory.length > 10) {
+            newHistory = newHistory.slice(-10);
+          }
+        }
+
         const raw: RawMemoryFragment = {
           id: f.id,
           title: params.title ?? f.title,
@@ -220,6 +248,7 @@ export class MemoryManager {
           tags: [...f.tags],
           expiresAt: (f as { expiresAt?: string | null }).expiresAt ?? null,
           parentFragmentId: (f as { parentFragmentId?: string | null }).parentFragmentId ?? null,
+          versionHistory: newHistory,
         };
 
         updated = raw;
@@ -307,6 +336,7 @@ export class MemoryManager {
         tags: params.tags ?? [],
         expiresAt,
         parentFragmentId: params.parentFragmentId ?? null,
+        versionHistory: [],
       };
       fragments.push(fragment);
     }
@@ -534,6 +564,7 @@ export class MemoryManager {
       tags: [...parent.tags, "auto-extracted"],
       expiresAt: parent.expiresAt,
       parentFragmentId: parent.id,
+      versionHistory: [] as readonly FragmentVersion[],
     }));
   }
 
@@ -661,6 +692,65 @@ export class MemoryManager {
   }
 
   /**
+   * Record a search query for pattern tracking.
+   */
+  async recordQuery(record: QueryRecord): Promise<void> {
+    await this.queryStore.append(record);
+  }
+
+  /**
+   * Get query history with optional filtering.
+   * Returns most recent queries first.
+   */
+  async getQueryHistory(options?: {
+    limit?: number;
+    project?: string;
+    tool?: "memory_read" | "search_semantic";
+  }): Promise<QueryRecord[]> {
+    const all = await this.queryStore.readAll();
+    let filtered = all;
+
+    if (options?.project !== undefined) {
+      filtered = filtered.filter((q) => q.project === options.project);
+    }
+    if (options?.tool) {
+      filtered = filtered.filter((q) => q.tool === options.tool);
+    }
+
+    // Most recent first
+    filtered.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+    return filtered.slice(0, options?.limit ?? 50);
+  }
+
+  /**
+   * Get top repeated queries (useful for suggestions).
+   */
+  async getTopQueries(limit = 10): Promise<Array<{ query: string; count: number; lastUsed: string }>> {
+    const all = await this.queryStore.readAll();
+    const freq = new Map<string, { count: number; lastUsed: string }>();
+
+    for (const record of all) {
+      const normalized = record.query.toLowerCase().trim();
+      if (normalized.length < 3) continue;
+
+      const existing = freq.get(normalized);
+      if (existing) {
+        existing.count++;
+        if (record.timestamp > existing.lastUsed) {
+          existing.lastUsed = record.timestamp;
+        }
+      } else {
+        freq.set(normalized, { count: 1, lastUsed: record.timestamp });
+      }
+    }
+
+    return Array.from(freq.entries())
+      .map(([query, data]) => ({ query, ...data }))
+      .sort((a, b) => b.count - a.count)
+      .slice(0, limit);
+  }
+
+  /**
    * Get fragment count.
    */
   async getCount(): Promise<number> {
@@ -729,6 +819,7 @@ function fromRaw(raw: RawMemoryFragment): MemoryFragment {
     tags: (raw.tags as readonly string[] | undefined) ?? [],
     expiresAt: (raw as { expiresAt?: string | null }).expiresAt ?? null,
     parentFragmentId: (raw as { parentFragmentId?: string | null }).parentFragmentId ?? null,
+    versionHistory: (raw as { versionHistory?: readonly FragmentVersion[] }).versionHistory ?? [],
   };
 }
 

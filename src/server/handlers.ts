@@ -207,6 +207,29 @@ const TOOLS = [
     },
   },
   {
+    name: "memory_history",
+    description: "View version history for a fragment. Shows previous content snapshots with timestamps and change reasons. Useful for auditing what the AI knew at a given time.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: { type: "string", description: "Fragment ID to view history for" },
+      },
+      required: ["id"],
+    },
+  },
+  {
+    name: "memory_queries",
+    description: "View search query history and patterns. Shows which queries are most frequent and when they were last used. Useful for identifying recurring information needs.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        limit: { type: "number", description: "Max results to return (default: 50)" },
+        project: { type: "string", description: "Filter by project" },
+        topOnly: { type: "boolean", description: "If true, return only top repeated queries ranked by frequency" },
+      },
+    },
+  },
+  {
     name: "session_create",
     description: "Create a new session for conversation tracking",
     inputSchema: {
@@ -459,6 +482,10 @@ export function registerServerToolHandlers(
           return await handleMemoryExtract(manager, args as unknown as { text: string; project?: string });
         case "memory_suggest":
           return await handleMemorySuggest(manager, guideManager);
+        case "memory_history":
+          return await handleMemoryHistory(manager, args as { id: string });
+        case "memory_queries":
+          return await handleMemoryQueries(manager, args as { limit?: number; project?: string; topOnly?: boolean });
         case "session_create":
           return await handleSessionCreate(
             manager,
@@ -537,6 +564,17 @@ async function handleMemoryRead(manager: MemoryManager, args: ContextRequest) {
     includeGlobal: args.project ? true : undefined,
   };
   const result = await manager.selectContext(contextRequest);
+
+  // Record query for pattern tracking
+  if (args.query) {
+    await manager.recordQuery({
+      query: args.query,
+      timestamp: new Date().toISOString(),
+      resultCount: result.fragments.length,
+      project: args.project ?? null,
+      tool: "memory_read",
+    });
+  }
 
   // Update session activity if provided
   if (args.sessionId) {
@@ -1275,6 +1313,18 @@ async function handleMemorySuggest(
     }
   }
 
+  // Check for frequent queries (potential guide/memory candidates)
+  const topQueries = await manager.getTopQueries(5);
+  for (const q of topQueries) {
+    if (q.count >= 3) {
+      suggestions.push({
+        type: "frequent_query",
+        message: `Query "${q.query}" searched ${q.count} times — consider creating a dedicated fragment or guide`,
+        details: { query: q.query, count: q.count, lastUsed: q.lastUsed },
+      });
+    }
+  }
+
   return {
     content: [
       {
@@ -1289,6 +1339,100 @@ async function handleMemorySuggest(
         ),
       },
     ],
+  };
+}
+
+/**
+ * Handle memory_history tool — view version history for a fragment.
+ */
+async function handleMemoryHistory(
+  manager: MemoryManager,
+  args: { id: string }
+) {
+  const fragment = await manager.get(args.id);
+
+  if (!fragment) {
+    return {
+      content: [{ type: "text" as const, text: JSON.stringify({ error: "Fragment not found", id: args.id }) }],
+    };
+  }
+
+  if (fragment.versionHistory.length === 0) {
+    return {
+      content: [{
+        type: "text" as const,
+        text: JSON.stringify({
+          id: fragment.id,
+          title: fragment.title,
+          currentContent: fragment.fragment,
+          versions: 0,
+          message: "No version history — this fragment has never been updated",
+        }),
+      }],
+    };
+  }
+
+  return {
+    content: [{
+      type: "text" as const,
+      text: JSON.stringify({
+        id: fragment.id,
+        title: fragment.title,
+        currentContent: fragment.fragment,
+        totalVersions: fragment.versionHistory.length,
+        versions: fragment.versionHistory.map((v, i) => ({
+          version: i + 1,
+          content: v.fragment,
+          title: v.title,
+          updatedAt: v.updatedAt,
+          changeReason: v.changeReason,
+        })),
+      }, null, 2),
+    }],
+  };
+}
+
+/**
+ * Handle memory_queries tool — view search query history and patterns.
+ */
+async function handleMemoryQueries(
+  manager: MemoryManager,
+  args: { limit?: number; project?: string; topOnly?: boolean }
+) {
+  if (args.topOnly) {
+    const topQueries = await manager.getTopQueries(args.limit ?? 10);
+    return {
+      content: [{
+        type: "text" as const,
+        text: JSON.stringify({
+          type: "top_queries",
+          totalTracked: topQueries.length,
+          queries: topQueries,
+        }, null, 2),
+      }],
+    };
+  }
+
+  const history = await manager.getQueryHistory({
+    limit: args.limit ?? 50,
+    project: args.project,
+  });
+
+  return {
+    content: [{
+      type: "text" as const,
+      text: JSON.stringify({
+        type: "query_history",
+        totalRecords: history.length,
+        queries: history.map((q) => ({
+          query: q.query,
+          timestamp: q.timestamp,
+          resultCount: q.resultCount,
+          project: q.project,
+          tool: q.tool,
+        })),
+      }, null, 2),
+    }],
   };
 }
 
@@ -1926,6 +2070,15 @@ async function handleSearchSemantic(
 
   // Sort by relevance and limit
   results.sort((a, b) => b.relevance - a.relevance);
+
+  // Record query for pattern tracking
+  await memoryManager.recordQuery({
+    query: args.query,
+    timestamp: new Date().toISOString(),
+    resultCount: results.length,
+    project: args.project ?? null,
+    tool: "search_semantic",
+  });
 
   return {
     content: [

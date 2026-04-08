@@ -15,6 +15,17 @@ export enum Priority {
 export type FragmentSource = "user" | "ai";
 
 /**
+ * A snapshot of a fragment at a point in time.
+ */
+export interface FragmentVersion {
+  readonly fragment: string;
+  readonly title: string;
+  readonly description: string;
+  readonly updatedAt: string;
+  readonly changeReason: string;
+}
+
+/**
  * A memory fragment stored in Continuo.
  */
 export interface MemoryFragment {
@@ -34,6 +45,7 @@ export interface MemoryFragment {
   readonly tags: readonly string[];
   readonly expiresAt: string | null;
   readonly parentFragmentId: string | null;
+  readonly versionHistory: readonly FragmentVersion[];
 }
 
 /**
@@ -55,6 +67,7 @@ export function toMemoryFragment(raw: RawMemoryFragment): MemoryFragment {
     tags: (raw.tags as readonly string[] | undefined) ?? [],
     expiresAt: (raw.expiresAt as string | null | undefined) ?? null,
     parentFragmentId: (raw.parentFragmentId as string | null | undefined) ?? null,
+    versionHistory: (raw as { versionHistory?: readonly FragmentVersion[] }).versionHistory ?? [],
   };
 }
 
@@ -277,6 +290,7 @@ export interface MemoryUpdateParams {
   readonly project?: string;
   readonly priority?: Priority;
   readonly confidence?: number;
+  readonly versionReason?: string;
 }
 
 /**
@@ -415,6 +429,17 @@ export interface SemanticSearchRequest {
   readonly limit?: number;
   readonly includeGuides?: boolean;
   readonly includeFragments?: boolean;
+}
+
+/**
+ * A recorded search query for pattern tracking.
+ */
+export interface QueryRecord {
+  readonly query: string;
+  readonly timestamp: string;
+  readonly resultCount: number;
+  readonly project: string | null;
+  readonly tool: "memory_read" | "search_semantic";
 }
 
 /**
