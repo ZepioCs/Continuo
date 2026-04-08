@@ -151,6 +151,14 @@ const TOOLS = [
     },
   },
   {
+    name: "memory_stats",
+    description: "Get memory usage statistics: fragment counts by project and priority, total tokens",
+    inputSchema: {
+      type: "object",
+      properties: {},
+    },
+  },
+  {
     name: "session_create",
     description: "Create a new session for conversation tracking",
     inputSchema: {
@@ -190,6 +198,28 @@ const TOOLS = [
       type: "object",
       properties: {
         sessionId: { type: "string", description: "Session ID to close" },
+      },
+      required: ["sessionId"],
+    },
+  },
+  {
+    name: "session_update",
+    description: "Update session context cache and conversation summary",
+    inputSchema: {
+      type: "object",
+      properties: {
+        sessionId: { type: "string", description: "Session ID" },
+        summary: { type: "string", description: "Conversation summary to store" },
+        context: {
+          type: "object",
+          description: "Key-value pairs to add to context cache",
+          additionalProperties: true,
+        },
+        contextPriority: {
+          type: "string",
+          enum: ["critical", "high", "normal", "low"],
+          description: "Priority for context entries (default: normal)",
+        },
       },
       required: ["sessionId"],
     },
@@ -369,6 +399,8 @@ export function registerServerToolHandlers(
           return await handleMemoryList(manager, args as unknown as ListArgs);
         case "memory_compress":
           return await handleMemoryCompress(manager, args as unknown as CompressArgs);
+        case "memory_stats":
+          return await handleMemoryStats(manager);
         case "session_create":
           return await handleSessionCreate(
             manager,
@@ -383,6 +415,16 @@ export function registerServerToolHandlers(
           );
         case "session_close":
           return await handleSessionClose(manager, args as unknown as { sessionId: string });
+        case "session_update":
+          return await handleSessionUpdate(
+            manager,
+            args as unknown as {
+              sessionId: string;
+              summary?: string;
+              context?: Record<string, unknown>;
+              contextPriority?: Priority;
+            }
+          );
         case "priority_set":
           return await handlePrioritySet(
             manager,
@@ -707,6 +749,22 @@ async function handleMemoryCompress(manager: MemoryManager, args: CompressArgs) 
 }
 
 /**
+ * Handle memory_stats tool.
+ */
+async function handleMemoryStats(manager: MemoryManager) {
+  const stats = await manager.getStats();
+
+  return {
+    content: [
+      {
+        type: "text",
+        text: JSON.stringify(stats, null, 2),
+      },
+    ],
+  };
+}
+
+/**
  * Handle session_create tool.
  */
 async function handleSessionCreate(
@@ -799,6 +857,68 @@ async function handleSessionClose(manager: MemoryManager, args: { sessionId: str
       {
         type: "text",
         text: JSON.stringify({ message: "Session closed" }, null, 2),
+      },
+    ],
+  };
+}
+
+/**
+ * Handle session_update tool.
+ */
+async function handleSessionUpdate(
+  manager: MemoryManager,
+  args: {
+    sessionId: string;
+    summary?: string;
+    context?: Record<string, unknown>;
+    contextPriority?: Priority;
+  }
+) {
+  const session = manager.sessionManager.getSession(args.sessionId);
+
+  if (!session) {
+    return {
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify({ error: "Session not found or expired" }, null, 2),
+        },
+      ],
+      isError: true,
+    };
+  }
+
+  // Update conversation summary
+  if (args.summary !== undefined) {
+    manager.sessionManager.updateSummary(args.sessionId, args.summary);
+  }
+
+  // Add context cache entries
+  if (args.context) {
+    const priority = args.contextPriority ?? "normal";
+    for (const [key, value] of Object.entries(args.context)) {
+      manager.sessionManager.addToContext(args.sessionId, key, value, priority);
+    }
+  }
+
+  // Return updated session
+  const updated = manager.sessionManager.getSession(args.sessionId);
+
+  return {
+    content: [
+      {
+        type: "text",
+        text: JSON.stringify(
+          {
+            message: "Session updated",
+            sessionId: args.sessionId,
+            turnCount: updated?.turnCount,
+            conversationSummary: updated?.conversationSummary,
+            contextCacheSize: updated?.contextCache.size ?? 0,
+          },
+          null,
+          2
+        ),
       },
     ],
   };

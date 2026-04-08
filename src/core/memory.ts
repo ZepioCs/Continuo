@@ -22,6 +22,9 @@ import type {
 
 const logger = createLogger("memory");
 
+const MAX_FRAGMENT_LENGTH = 10000;
+const DEDUP_SIMILARITY_THRESHOLD = 0.85;
+
 /**
  * Memory manager options.
  */
@@ -85,8 +88,29 @@ export class MemoryManager {
 
   /**
    * Add a new memory fragment.
+   * Validates input, checks for duplicates, and adds if unique.
    */
   async add(params: MemoryAddParams): Promise<MemoryFragment> {
+    validateFragmentContent(params.fragment);
+
+    // Check for near-duplicates before adding
+    const existing = await this.findDuplicate(params.fragment, params.project);
+    if (existing) {
+      // Update the existing fragment with new data (merge)
+      const updated = await this.update({
+        id: existing.id,
+        fragment: params.fragment,
+        priority: params.priority ?? (existing.priority as Priority),
+        confidence: params.confidence ?? existing.confidence,
+        tags: params.tags?.length ? params.tags : [...existing.tags],
+      });
+      logger.debug("Updated duplicate instead of adding new", {
+        existingId: existing.id,
+        title: existing.title,
+      });
+      return updated!;
+    }
+
     const now = new Date().toISOString();
 
     const fragment: MemoryFragment = {
@@ -303,6 +327,39 @@ export class MemoryManager {
   }
 
   /**
+   * Find a near-duplicate fragment using Jaccard similarity.
+   * Only checks fragments with matching project scope.
+   */
+  private async findDuplicate(
+    content: string,
+    project?: string | null
+  ): Promise<MemoryFragment | null> {
+    const fragments = await this.listFragments();
+
+    // First pass: exact content match (fast)
+    const normalized = content.toLowerCase().replace(/\s+/g, " ").trim();
+    for (const frag of fragments) {
+      const existing = frag.fragment.toLowerCase().replace(/\s+/g, " ").trim();
+      if (existing === normalized) {
+        return frag;
+      }
+    }
+
+    // Second pass: Jaccard similarity (only same project or global)
+    for (const frag of fragments) {
+      // Skip if projects don't match (null/global fragments match everything)
+      if (project !== undefined && frag.project !== project && frag.project !== null) {
+        continue;
+      }
+      if (jaccardSimilarity(content, frag.fragment) > DEDUP_SIMILARITY_THRESHOLD) {
+        return frag;
+      }
+    }
+
+    return null;
+  }
+
+  /**
    * List all fragments.
    */
   async listFragments(options?: {
@@ -461,4 +518,41 @@ export async function createMemoryManager(options?: MemoryManagerOptions): Promi
   const manager = new MemoryManager(options);
   await manager.initialize();
   return manager;
+}
+
+/**
+ * Validate fragment content before storage.
+ */
+function validateFragmentContent(content: string): void {
+  if (!content || content.trim().length === 0) {
+    throw new Error("Fragment content must not be empty or whitespace-only");
+  }
+  if (content.length > MAX_FRAGMENT_LENGTH) {
+    throw new Error(
+      `Fragment content exceeds maximum length of ${MAX_FRAGMENT_LENGTH} characters (got ${content.length})`
+    );
+  }
+}
+
+/**
+ * Jaccard word similarity between two strings.
+ */
+function jaccardSimilarity(a: string, b: string): number {
+  const normalize = (s: string) =>
+    new Set(
+      s.toLowerCase().replace(/[^\w\s]/g, "").split(/\s+/).filter((w) => w.length > 2)
+    );
+  const wordsA = normalize(a);
+  const wordsB = normalize(b);
+
+  if (wordsA.size === 0 && wordsB.size === 0) return 1;
+  if (wordsA.size === 0 || wordsB.size === 0) return 0;
+
+  let intersection = 0;
+  for (const word of wordsA) {
+    if (wordsB.has(word)) intersection++;
+  }
+
+  const union = wordsA.size + wordsB.size - intersection;
+  return union === 0 ? 0 : intersection / union;
 }
