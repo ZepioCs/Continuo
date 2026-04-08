@@ -24,9 +24,11 @@ Continuo is a token-aware persistent memory MCP server for AI agents. It provide
 
 ### Intelligence
 - **Memory Extract** — Heuristic fact extraction (preferences, facts, solutions, constants, versions, errors, key-values)
-- **Memory Suggest** — Proactive analysis (guide candidates, stale fragments, duplicates, budget warnings, orphans)
+- **Memory Suggest** — Proactive analysis (guide candidates, stale fragments, duplicates, budget warnings, orphans, frequent queries)
 - **Auto-prioritization** — Promotes frequently accessed fragments, demotes stale high-priority ones
 - **Project Inheritance** — Shared context across related projects via `inherits` array
+- **Fragment Versioning** — Track content history (max 10 versions) with `memory_history` tool
+- **Query Pattern Tracking** — Record all searches, surface frequent queries as suggestions
 
 ### Procedural Knowledge
 - **Guides** — Track reusable procedures with usage counts and contextual learnings
@@ -62,8 +64,6 @@ Continuo is a token-aware persistent memory MCP server for AI agents. It provide
 ## Future Directions
 
 ### Short-term Improvements
-- **Fragment Versioning** — Track history of updates for "what did I know at time X?" queries
-- **Query Pattern Tracking** — Improve suggestions by remembering what the AI searches for most
 - **Semantic memory_read Integration** — Full semantic engine ranking instead of just priority-based selection
 
 ### Long-term Vision
@@ -74,6 +74,13 @@ Continuo is a token-aware persistent memory MCP server for AI agents. It provide
 ---
 
 ## Changelog
+
+### v0.5.0 — Fragment Versioning, Query Pattern Tracking
+- Fragment version history: track previous content on update (max 10 versions)
+- `memory_history` tool to view past content at any point in time
+- Query pattern tracking: record all memory_read and search_semantic queries
+- `memory_queries` tool to view history and top repeated queries
+- Frequent queries (3+) surfaced in memory_suggest as guide candidates
 
 ### v0.4.0 — Priority Multipliers, Memory Decay, Undo, Export/Import
 - Priority multipliers actually affect token budget allocation
