@@ -20,7 +20,7 @@ Continuo is a token-aware persistent memory MCP server for AI agents. It provide
 - **Auto Sub-fact Extraction** — Large fragments (>150 words) split into retrievable sub-facts
 - **Fragment TTL** — Optional time-to-live with auto-expiration
 - **Compression** — Token-efficient compression with non-destructive undo backup
-- **Export/Import** — JSON backup and migration between instances
+- **Export/Import** — JSON backup and migration between instances, with project/priority filtering and pagination
 
 ### Intelligence
 - **Memory Extract** — Heuristic fact extraction (preferences, facts, solutions, constants, versions, errors, key-values)
@@ -34,6 +34,7 @@ Continuo is a token-aware persistent memory MCP server for AI agents. It provide
 - **Guides** — Track reusable procedures with usage counts and contextual learnings
 - **Guide Suggestions** — Semantic search across guides for task-relevant knowledge
 - **Guide Distillation** — Transform memory fragments into guide learnings
+- **Guide Auto-creation** — `guide_practice` creates guides on-the-fly if they don't exist
 
 ### Performance
 - **In-memory Fragment Cache** — Eliminates repeated JSONL file scans
@@ -59,7 +60,7 @@ Continuo is a token-aware persistent memory MCP server for AI agents. It provide
 - One runtime dependency: `@modelcontextprotocol/sdk` (required for MCP protocol)
 - JSONL file storage (no SQLite, no Redis)
 - MCP protocol only (no HTTP endpoints)
-- 60 tests, all passing
+- 57 tests, all passing
 - Single-process only (in-memory cache)
 
 ## Known Limitations
@@ -68,7 +69,7 @@ Continuo is a token-aware persistent memory MCP server for AI agents. It provide
 |------|-------|--------|
 | Search | TF-IDF can't capture synonyms or semantic meaning beyond term overlap | "Where does the user live?" won't match "residence" |
 | Abstention | No confidence threshold to refuse answering | Returns results when it should return nothing (R@1 = 0%) |
-| Knowledge Updates | Updated content doesn't always rank first | R@1 = 60%, temporal boost helps but isn't sufficient |
+| Knowledge Updates | Updated content doesn't always rank first | R@1 = 80%, temporal boost helps but isn't sufficient |
 | Storage | JSONL scan on every operation | Degrades with 1000+ fragments |
 | Scale | In-memory cache is per-process | Multiple MCP clients can't share a cache |
 | Security | Plaintext JSONL storage | Don't store secrets |
@@ -89,6 +90,13 @@ Continuo is a token-aware persistent memory MCP server for AI agents. It provide
 ---
 
 ## Changelog
+
+### v0.7.0 — Guide API Cleanup, Filtered Export
+- `memory_export` supports filtering by `project` and `priority`, plus pagination with `limit`/`offset`
+- `guide_practice` now requires `contexts` and `learnings`; supports optional `category`/`description` for auto-creating guides
+- `guide_update` now requires `id` (not name); removed `contexts`/`learnings` (use `guide_practice`)
+- `guide_distill` renamed `fragmentId` to `memoryId`; added `category` param; removed `contexts`
+- Cleaned up test suite (removed redundant TF-IDF/cosine similarity unit tests): 60 → 57 tests
 
 ### v0.6.0 — Light Stemming, Search Quality Improvements
 - Light stemmer for token normalization (plurals, past tense, adverbs)

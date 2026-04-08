@@ -161,10 +161,15 @@ const TOOLS = [
   },
   {
     name: "memory_export",
-    description: "Export all fragments as JSON for backup or migration",
+    description: "Export fragments as JSON for backup or migration. Supports filtering by project/priority and pagination with limit/offset.",
     inputSchema: {
       type: "object",
-      properties: {},
+      properties: {
+        project: { type: "string", description: "Filter by project name" },
+        priority: { type: "string", enum: ["critical", "high", "normal", "low"], description: "Filter by priority level" },
+        limit: { type: "number", description: "Maximum number of fragments to export (default: all)" },
+        offset: { type: "number", description: "Skip first N fragments (default: 0)" },
+      },
     },
   },
   {
@@ -360,10 +365,12 @@ const TOOLS = [
       type: "object",
       properties: {
         guide: { type: "string", description: "Guide name or ID" },
+        category: { type: "string", description: "Guide category (used when creating new guide)" },
+        description: { type: "string", description: "Guide description (used when creating new guide)" },
         contexts: { type: "array", items: { type: "string" }, description: "Contexts where used" },
         learnings: { type: "array", items: { type: "string" }, description: "New learnings from this session" },
       },
-      required: ["guide"],
+      required: ["guide", "contexts", "learnings"],
     },
   },
   {
@@ -372,14 +379,12 @@ const TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        guide: { type: "string", description: "Guide name or ID" },
+        id: { type: "string", description: "Guide ID to update" },
         name: { type: "string", description: "New name" },
         category: { type: "string", description: "New category" },
         description: { type: "string", description: "New description" },
-        contexts: { type: "array", items: { type: "string" } },
-        learnings: { type: "array", items: { type: "string" } },
       },
-      required: ["guide"],
+      required: ["id"],
     },
   },
   {
@@ -412,10 +417,10 @@ const TOOLS = [
       type: "object",
       properties: {
         guide: { type: "string", description: "Guide name or ID" },
-        fragmentId: { type: "string", description: "Fragment ID to distill" },
-        contexts: { type: "array", items: { type: "string" }, description: "Contexts for this learning" },
+        memoryId: { type: "string", description: "Fragment ID to distill" },
+        category: { type: "string", description: "Guide category (required if creating new guide)" },
       },
-      required: ["guide", "fragmentId"],
+      required: ["guide", "memoryId"],
     },
   },
   {
@@ -473,7 +478,15 @@ export function registerServerToolHandlers(
         case "memory_undo":
           return await handleMemoryUndo(manager);
         case "memory_export":
-          return await handleMemoryExport(manager);
+          return await handleMemoryExport(
+            manager,
+            args as unknown as {
+              project?: string;
+              priority?: string;
+              limit?: number;
+              offset?: number;
+            },
+          );
         case "memory_import":
           return await handleMemoryImport(manager, args as { data: string });
         case "memory_stats":
@@ -1051,14 +1064,34 @@ async function handleMemoryUndo(manager: MemoryManager) {
 /**
  * Handle memory_export tool.
  */
-async function handleMemoryExport(manager: MemoryManager) {
-  const fragments = await manager.listFragments();
+async function handleMemoryExport(
+  manager: MemoryManager,
+  args?: {
+    project?: string;
+    priority?: string;
+    limit?: number;
+    offset?: number;
+  },
+) {
+  const fragments = await manager.listFragments({
+    project: args?.project,
+    priority: args?.priority as Priority | undefined,
+  });
+
+  const offset = args?.offset ?? 0;
+  const limit = args?.limit;
+  const paginated = limit != null ? fragments.slice(offset, offset + limit) : fragments.slice(offset);
 
   const exportData = {
     version: 1,
     exportedAt: new Date().toISOString(),
-    fragmentCount: fragments.length,
-    fragments: fragments.map((f) => ({
+    totalCount: fragments.length,
+    exportedCount: paginated.length,
+    offset,
+    ...(limit != null ? { limit } : {}),
+    ...(args?.project ? { project: args.project } : {}),
+    ...(args?.priority ? { priority: args.priority } : {}),
+    fragments: paginated.map((f) => ({
       id: f.id,
       title: f.title,
       description: f.description,

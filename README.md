@@ -83,7 +83,7 @@ Reference: LongMemEval reports BM25 retrieval R@5 at ~65-75% (session-level) and
 
 - **Abstention doesn't work** — R@1 for the abstention benchmark is 0%. The system returns results when it should return nothing. This is a fundamental limitation of the scoring approach — there's no confidence threshold below which the system refuses to answer.
 
-- **Knowledge Updates R@1 is 60%** — When content has multiple versions, the updated version doesn't always rank first. Temporal boosting helps but doesn't fully solve this.
+- **Knowledge Updates R@1 is 80%** — When content has multiple versions, the updated version doesn't always rank first. Temporal boosting helps but doesn't fully solve this.
 
 - **Query history grows unbounded** — `query-history.jsonl` accumulates every search forever. No automatic cleanup.
 
@@ -135,7 +135,7 @@ Add to your MCP client config:
 | `memory_list` | List fragments with optional filtering |
 | `memory_compress` | Compress similar low-priority fragments (non-destructive) |
 | `memory_undo` | Restore last compressed fragments |
-| `memory_export` | Export all fragments as JSON |
+| `memory_export` | Export fragments as JSON with project/priority filtering and pagination |
 | `memory_import` | Import fragments from JSON |
 | `memory_stats` | Memory health statistics |
 | `memory_extract` | Extract storeable facts from raw text |
@@ -151,8 +151,8 @@ Add to your MCP client config:
 | `guide_get` | Retrieve a guide by name or ID |
 | `guide_list` | List guides with category/sort filtering |
 | `guide_suggest` | Suggest relevant guides for a task |
-| `guide_practice` | Record usage with contexts and learnings |
-| `guide_update` | Update guide properties |
+| `guide_practice` | Record usage with contexts and learnings (auto-creates guide if needed) |
+| `guide_update` | Update guide properties by ID |
 | `guide_distill` | Extract guide learning from a memory fragment |
 
 ### Semantic Search
@@ -238,7 +238,7 @@ Guides store reusable patterns and workflows. Unlike fragments (facts), guides t
 ## Development
 
 ```bash
-bun test          # Run test suite (60 tests)
+bun test          # Run test suite (57 tests)
 bun run lint     # Lint
 bun run lint:fix # Auto-fix lint issues
 ```
