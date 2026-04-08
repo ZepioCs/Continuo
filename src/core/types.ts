@@ -32,6 +32,8 @@ export interface MemoryFragment {
   readonly inherits: readonly string[];
   estimatedTokens: number;
   readonly tags: readonly string[];
+  readonly expiresAt: string | null;
+  readonly parentFragmentId: string | null;
 }
 
 /**
@@ -51,6 +53,8 @@ export function toMemoryFragment(raw: RawMemoryFragment): MemoryFragment {
     ...raw,
     inherits: (raw.inherits as readonly string[] | undefined) ?? [],
     tags: (raw.tags as readonly string[] | undefined) ?? [],
+    expiresAt: (raw.expiresAt as string | null | undefined) ?? null,
+    parentFragmentId: (raw.parentFragmentId as string | null | undefined) ?? null,
   };
 }
 
@@ -258,6 +262,8 @@ export type MemoryAddParams = {
   readonly source?: FragmentSource;
   readonly inherits?: readonly string[];
   readonly tags?: readonly string[];
+  readonly ttl?: number;
+  readonly parentFragmentId?: string;
 };
 
 /**

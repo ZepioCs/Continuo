@@ -43,7 +43,7 @@ const TOOLS = [
   },
   {
     name: "memory_add",
-    description: "Add a new memory fragment with priority, confidence, and tags",
+    description: "Add a new memory fragment with priority, confidence, tags, and optional TTL. Large fragments (>150 words) are automatically split into sub-facts.",
     inputSchema: {
       type: "object",
       properties: {
@@ -54,6 +54,7 @@ const TOOLS = [
         priority: { type: "string", enum: ["critical", "high", "normal", "low"], description: "Priority level" },
         confidence: { type: "number", description: "Confidence score (0-1)" },
         tags: { type: "array", items: { type: "string" }, description: "Tags for categorization" },
+        ttl: { type: "number", description: "Time-to-live in days (e.g., 30). Fragment auto-expires after this period." },
       },
       required: ["fragment"],
     },
@@ -153,6 +154,26 @@ const TOOLS = [
   {
     name: "memory_stats",
     description: "Get memory usage statistics: fragment counts by project and priority, total tokens",
+    inputSchema: {
+      type: "object",
+      properties: {},
+    },
+  },
+  {
+    name: "memory_extract",
+    description: "Extract storeable facts from raw text using pattern matching. Returns extracted facts with suggested priority and tags for review before storing.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        text: { type: "string", description: "Raw text to extract facts from (conversation summary, error logs, etc.)" },
+        project: { type: "string", description: "Project to associate extracted facts with" },
+      },
+      required: ["text"],
+    },
+  },
+  {
+    name: "memory_suggest",
+    description: "Analyze current memory state and return actionable suggestions: create guides for hot topics, compress stale fragments, cleanup expired items, etc.",
     inputSchema: {
       type: "object",
       properties: {},
@@ -401,6 +422,10 @@ export function registerServerToolHandlers(
           return await handleMemoryCompress(manager, args as unknown as CompressArgs);
         case "memory_stats":
           return await handleMemoryStats(manager);
+        case "memory_extract":
+          return await handleMemoryExtract(manager, args as unknown as { text: string; project?: string });
+        case "memory_suggest":
+          return await handleMemorySuggest(manager, guideManager);
         case "session_create":
           return await handleSessionCreate(
             manager,
@@ -511,11 +536,31 @@ async function handleMemoryRead(manager: MemoryManager, args: ContextRequest) {
 async function handleMemoryAdd(manager: MemoryManager, args: MemoryAddParams) {
   const fragment = await manager.add(args);
 
+  // Check for auto-extracted sub-facts
+  const fragments = await manager.listFragments();
+  const subFacts = fragments.filter(
+    (f) => f.parentFragmentId === fragment.id
+  );
+
+  const result: Record<string, unknown> = {
+    id: fragment.id,
+    message: "Fragment added successfully",
+  };
+
+  if (subFacts.length > 0) {
+    result.subFactsExtracted = subFacts.length;
+    result.subFactIds = subFacts.map((f) => f.id);
+  }
+
+  if (fragment.expiresAt) {
+    result.expiresAt = fragment.expiresAt;
+  }
+
   return {
     content: [
       {
         type: "text",
-        text: JSON.stringify({ id: fragment.id, message: "Fragment added successfully" }, null, 2),
+        text: JSON.stringify(result, null, 2),
       },
     ],
   };
@@ -759,6 +804,167 @@ async function handleMemoryStats(manager: MemoryManager) {
       {
         type: "text",
         text: JSON.stringify(stats, null, 2),
+      },
+    ],
+  };
+}
+
+/**
+ * Handle memory_extract tool.
+ * Extracts storeable facts from raw text using pattern matching.
+ */
+async function handleMemoryExtract(
+  manager: MemoryManager,
+  args: { text: string; project?: string }
+) {
+  const facts = extractFacts(args.text);
+
+  return {
+    content: [
+      {
+        type: "text",
+        text: JSON.stringify(
+          {
+            factsExtracted: facts.length,
+            facts: facts.map((f) => ({
+              content: f.content,
+              suggestedPriority: f.priority,
+              suggestedTags: f.tags,
+              type: f.type,
+            })),
+            hint: "Review these facts and store relevant ones with memory_add or memory_add_batch.",
+          },
+          null,
+          2
+        ),
+      },
+    ],
+  };
+}
+
+/**
+ * Handle memory_suggest tool.
+ * Analyzes memory state and returns actionable suggestions.
+ */
+async function handleMemorySuggest(
+  manager: MemoryManager,
+  guideManager: GuideManager | undefined
+) {
+  const stats = await manager.getStats();
+  const fragments = await manager.listFragments();
+  const suggestions: Array<{ type: string; message: string; action?: string; details?: unknown }> = [];
+
+  // Check for hot topics (many fragments in same project)
+  const projectCounts = Object.entries(stats.byProject)
+    .sort((a, b) => b[1] - a[1]);
+
+  for (const [project, count] of projectCounts) {
+    if (count >= 10) {
+      suggestions.push({
+        type: "guide_candidate",
+        message: `Project "${project}" has ${count} fragments — consider creating a guide for procedural knowledge`,
+        action: `guide_create({name: "${project}", category: "dev-tool", description: "Procedural knowledge for ${project}"})`,
+        details: { project, fragmentCount: count },
+      });
+    }
+  }
+
+  // Check for stale low-priority fragments
+  const staleFragments = fragments.filter((f) => {
+    if (f.priority !== "low" && f.priority !== "normal") return false;
+    const ageDays = (Date.now() - new Date(f.lastAccessed).getTime()) / 86400000;
+    return ageDays > 30 && f.accessed < 2;
+  });
+
+  if (staleFragments.length >= 3) {
+    suggestions.push({
+      type: "compress",
+      message: `${staleFragments.length} stale fragments (not accessed in 30+ days) — consider compressing`,
+      action: `memory_compress({maxFragments: ${Math.min(staleFragments.length, 10)}})`,
+      details: { staleCount: staleFragments.length, ids: staleFragments.slice(0, 5).map((f) => f.id) },
+    });
+  }
+
+  // Check for expired fragments
+  const expiredFragments = fragments.filter(
+    (f) => f.expiresAt && new Date(f.expiresAt).getTime() < Date.now()
+  );
+
+  if (expiredFragments.length > 0) {
+    suggestions.push({
+      type: "cleanup",
+      message: `${expiredFragments.length} expired fragments found — will be cleaned on next restart`,
+      details: { expiredCount: expiredFragments.length },
+    });
+  }
+
+  // Check for near-duplicates (same project, similar titles)
+  const titleGroups = new Map<string, number>();
+  for (const f of fragments) {
+    const baseTitle = f.title.split(/[-:[]/)[0]?.trim().toLowerCase() ?? f.title;
+    if (baseTitle.length > 3) {
+      titleGroups.set(baseTitle, (titleGroups.get(baseTitle) ?? 0) + 1);
+    }
+  }
+
+  const duplicates = [...titleGroups.entries()].filter(([, count]) => count > 1);
+  if (duplicates.length > 0) {
+    suggestions.push({
+      type: "dedup",
+      message: `${duplicates.length} potential duplicate groups detected — dedup is active on write`,
+      details: {
+        duplicateGroups: duplicates.slice(0, 5).map(([title, count]) => ({ title, count })),
+      },
+    });
+  }
+
+  // Check token usage
+  if (stats.totalTokens > 6000) {
+    suggestions.push({
+      type: "budget",
+      message: `Memory using ${stats.totalTokens} tokens — consider compressing or increasing budget`,
+      details: { totalTokens: stats.totalTokens, defaultBudget: 8000 },
+    });
+  }
+
+  // Check if guides exist for common projects
+  if (guideManager) {
+    const guides = await guideManager.listGuides({});
+    if (projectCounts.length > 0 && guides.length === 0) {
+      suggestions.push({
+        type: "no_guides",
+        message: "No guides created yet — guides track reusable procedural knowledge across sessions",
+        action: "guide_create({name: 'workflow', category: 'dev-tool', description: 'Your workflow patterns'})",
+      });
+    }
+  }
+
+  // Check for orphaned sub-facts (parent deleted)
+  const subFacts = fragments.filter((f) => f.parentFragmentId);
+  if (subFacts.length > 0) {
+    const parentIds = new Set(fragments.map((f) => f.id));
+    const orphans = subFacts.filter((f) => !parentIds.has(f.parentFragmentId!));
+    if (orphans.length > 0) {
+      suggestions.push({
+        type: "orphans",
+        message: `${orphans.length} orphaned sub-facts found (parent fragment deleted) — consider removing`,
+        details: { orphanIds: orphans.map((f) => f.id) },
+      });
+    }
+  }
+
+  return {
+    content: [
+      {
+        type: "text",
+        text: JSON.stringify(
+          {
+            suggestions: suggestions.length > 0 ? suggestions : [{ type: "healthy", message: "Memory looks healthy — no action needed" }],
+            stats,
+          },
+          null,
+          2
+        ),
       },
     ],
   };
@@ -1443,4 +1649,103 @@ function formatGuide(guide: {
     contexts: guide.contexts,
     learnings: guide.learnings,
   };
+}
+
+/**
+ * Fact extraction patterns and types.
+ */
+interface ExtractedFact {
+  readonly content: string;
+  readonly priority: string;
+  readonly tags: readonly string[];
+  readonly type: string;
+}
+
+interface ExtractionPattern {
+  readonly type: string;
+  readonly regex: RegExp;
+  readonly priority: string;
+  readonly tags: readonly string[];
+}
+
+const EXTRACTION_PATTERNS: readonly ExtractionPattern[] = [
+  {
+    type: "preference",
+    regex: /(?:I |user |they )?(?:prefer|prefers|likes?|dislikes?|loves?|hates?|always uses?|never uses?|avoids?|avoids? using)\s+(.+?)(?:\.|,|$)/gi,
+    priority: "high",
+    tags: ["preference"],
+  },
+  {
+    type: "fact",
+    regex: /^[-•*]\s+(?:\w[\w\s]*?)(?:\s+(?:is|are|uses?|supports?|requires?|has|have|provides?|runs? on|located at|stored in))\s+(.+?)(?:\.|,|$)/gim,
+    priority: "normal",
+    tags: ["fact"],
+  },
+  {
+    type: "solution",
+    regex: /(?:fix|solution|resolved|workaround|the issue was|the problem was|root cause)[:\s]+(.+?)(?:\.|,|$)/gi,
+    priority: "high",
+    tags: ["solution", "debugging"],
+  },
+  {
+    type: "constant",
+    regex: /(?:rate limit|timeout|port|max retries?|buffer size|cache size|token budget|ttl|max sessions?|deadline)[:\s]+(\d[\d,.]*\s*\w*)(?:\.|,|$)/gi,
+    priority: "normal",
+    tags: ["constant"],
+  },
+  {
+    type: "version",
+    regex: /(?:version|v|using|upgraded to|migrated to|switched to)[:\s]+(\S+?)(?:\.|,|$)/gi,
+    priority: "normal",
+    tags: ["version"],
+  },
+  {
+    type: "error",
+    regex: /(?:error|bug|issue|failure|crash|panic)[:\s]+(.+?)(?:\.|,|$)/gi,
+    priority: "high",
+    tags: ["error", "debugging"],
+  },
+  {
+    type: "key-value",
+    regex: /^(\w[\w\s]{2,25}?)[:=]\s*(.+?)$/gm,
+    priority: "normal",
+    tags: ["key-value"],
+  },
+];
+
+/**
+ * Extract facts from raw text using pattern matching.
+ */
+function extractFacts(text: string): ExtractedFact[] {
+  const facts: ExtractedFact[] = [];
+  const seen = new Set<string>();
+
+  for (const pattern of EXTRACTION_PATTERNS) {
+    const regex = new RegExp(pattern.regex.source, pattern.regex.flags);
+    let match: RegExpExecArray | null;
+
+    while ((match = regex.exec(text)) !== null) {
+      const content = match[0]!.trim();
+      const normalized = content.toLowerCase();
+
+      // Deduplicate
+      if (seen.has(normalized)) continue;
+      seen.add(normalized);
+
+      // Skip very short or very long matches
+      if (content.length < 10 || content.length > 200) continue;
+
+      // Skip pure numeric matches
+      if (/^\d+$/.test(content.trim())) continue;
+
+      facts.push({
+        content,
+        priority: pattern.priority,
+        tags: pattern.tags,
+        type: pattern.type,
+      });
+    }
+  }
+
+  return facts.slice(0, 20); // Cap at 20 facts
 }

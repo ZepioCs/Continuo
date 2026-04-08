@@ -24,6 +24,8 @@ const logger = createLogger("memory");
 
 const MAX_FRAGMENT_LENGTH = 10000;
 const DEDUP_SIMILARITY_THRESHOLD = 0.85;
+const AUTO_EXTRACT_MIN_WORDS = 150;
+const AUTO_EXTRACT_MAX_SUBFACTS = 5;
 
 /**
  * Memory manager options.
@@ -38,6 +40,7 @@ export interface MemoryManagerOptions {
 
 /**
  * Memory manager for fragment CRUD and context selection.
+ * Uses in-memory cache to avoid repeated JSONL file scans.
  */
 export class MemoryManager {
   readonly storage: AtomicStorage;
@@ -48,6 +51,7 @@ export class MemoryManager {
   readonly semanticSearch: SemanticSearch | null;
 
   private initialized = false;
+  private fragmentCache: MemoryFragment[] | null = null;
 
   constructor(options: MemoryManagerOptions = {}) {
     this.storage = new AtomicStorage({ basePath: options.storagePath ?? "~/.continuo" });
@@ -71,24 +75,46 @@ export class MemoryManager {
 
     await this.sessionManager.initialize();
 
-    // Auto-prioritize on load
-    const fragments = await this.listFragments();
+    // Load all fragments into cache
+    const allRaw = await this.fragmentStore.readAll();
+    let fragments = allRaw.map(fromRaw);
+
+    // Clean up expired fragments
+    const now = Date.now();
+    const expired = fragments.filter((f) => f.expiresAt && new Date(f.expiresAt).getTime() < now);
+    if (expired.length > 0) {
+      logger.info(`Cleaning up ${expired.length} expired fragments`);
+      const expiredIds = new Set(expired.map((f) => f.id));
+      fragments = fragments.filter((f) => !expiredIds.has(f.id));
+      await this.saveFragments(fragments);
+
+      if (this.semanticSearch) {
+        for (const f of expired) {
+          this.semanticSearch.removeFragment(f.id);
+        }
+      }
+    }
+
+    // Auto-prioritize
     this.prioritizer.autoPrioritize(fragments);
 
-    // Index fragments for semantic search
+    // Index for semantic search
     if (this.semanticSearch) {
       this.semanticSearch.indexFragments(fragments);
     }
 
     await this.saveFragments(fragments);
 
+    // Populate cache
+    this.fragmentCache = fragments;
+
     this.initialized = true;
-    logger.info("Memory manager initialized");
+    logger.info("Memory manager initialized", { fragmentCount: fragments.length });
   }
 
   /**
    * Add a new memory fragment.
-   * Validates input, checks for duplicates, and adds if unique.
+   * Validates input, checks for duplicates, auto-extracts sub-facts, and adds if unique.
    */
   async add(params: MemoryAddParams): Promise<MemoryFragment> {
     validateFragmentContent(params.fragment);
@@ -96,7 +122,6 @@ export class MemoryManager {
     // Check for near-duplicates before adding
     const existing = await this.findDuplicate(params.fragment, params.project);
     if (existing) {
-      // Update the existing fragment with new data (merge)
       const updated = await this.update({
         id: existing.id,
         fragment: params.fragment,
@@ -112,6 +137,7 @@ export class MemoryManager {
     }
 
     const now = new Date().toISOString();
+    const expiresAt = params.ttl ? new Date(Date.now() + params.ttl * 86400000).toISOString() : null;
 
     const fragment: MemoryFragment = {
       id: this.generateId(),
@@ -128,16 +154,39 @@ export class MemoryManager {
       inherits: params.inherits ?? [],
       estimatedTokens: estimateTokensAccurate(params.fragment),
       tags: params.tags ?? [],
+      expiresAt,
+      parentFragmentId: params.parentFragmentId ?? null,
     };
 
     await this.fragmentStore.append(toRaw(fragment));
+
+    // Update cache
+    if (this.fragmentCache) {
+      this.fragmentCache.push(fragment);
+    }
 
     // Incrementally update semantic search index
     if (this.semanticSearch) {
       this.semanticSearch.upsertFragment(fragment);
     }
 
-    logger.debug("Added fragment", { id: fragment.id, title: fragment.title });
+    // Auto-extract sub-facts from large fragments
+    const subFacts = this.extractSubFacts(fragment);
+    for (const sub of subFacts) {
+      await this.fragmentStore.append(toRaw(sub));
+      if (this.fragmentCache) {
+        this.fragmentCache.push(sub);
+      }
+      if (this.semanticSearch) {
+        this.semanticSearch.upsertFragment(sub);
+      }
+    }
+
+    logger.debug("Added fragment", {
+      id: fragment.id,
+      title: fragment.title,
+      subFactsExtracted: subFacts.length,
+    });
 
     return fragment;
   }
@@ -151,7 +200,6 @@ export class MemoryManager {
     await this.fragmentStore.update(
       (f) => f.id === params.id,
       (f) => {
-        // Build new raw object with updates applied
         const raw: RawMemoryFragment = {
           id: f.id,
           title: params.title ?? f.title,
@@ -170,6 +218,8 @@ export class MemoryManager {
               ? estimateTokensAccurate(params.fragment)
               : f.estimatedTokens,
           tags: [...f.tags],
+          expiresAt: (f as { expiresAt?: string | null }).expiresAt ?? null,
+          parentFragmentId: (f as { parentFragmentId?: string | null }).parentFragmentId ?? null,
         };
 
         updated = raw;
@@ -179,6 +229,14 @@ export class MemoryManager {
 
     if (updated) {
       const fragment = fromRaw(updated);
+
+      // Update cache
+      if (this.fragmentCache) {
+        const idx = this.fragmentCache.findIndex((f) => f.id === fragment.id);
+        if (idx !== -1) {
+          this.fragmentCache[idx] = fragment;
+        }
+      }
 
       // Incrementally update semantic search index
       if (this.semanticSearch) {
@@ -207,6 +265,11 @@ export class MemoryManager {
     });
 
     if (found) {
+      // Update cache
+      if (this.fragmentCache) {
+        this.fragmentCache = this.fragmentCache.filter((f) => f.id !== id);
+      }
+
       // Remove from semantic search index
       if (this.semanticSearch) {
         this.semanticSearch.removeFragment(id);
@@ -226,6 +289,7 @@ export class MemoryManager {
     const fragments: MemoryFragment[] = [];
 
     for (const params of paramsList) {
+      const expiresAt = params.ttl ? new Date(Date.now() + params.ttl * 86400000).toISOString() : null;
       const fragment: MemoryFragment = {
         id: this.generateId(),
         title: params.title ?? this.extractTitle(params.fragment),
@@ -241,6 +305,8 @@ export class MemoryManager {
         inherits: params.inherits ?? [],
         estimatedTokens: estimateTokensAccurate(params.fragment),
         tags: params.tags ?? [],
+        expiresAt,
+        parentFragmentId: params.parentFragmentId ?? null,
       };
       fragments.push(fragment);
     }
@@ -252,6 +318,11 @@ export class MemoryManager {
       const newValue = current.trim() ? `${current}\n${newLines.join("\n")}` : newLines.join("\n");
       return { result: undefined, newValue };
     });
+
+    // Update cache
+    if (this.fragmentCache) {
+      this.fragmentCache.push(...fragments);
+    }
 
     // Update semantic search index for all fragments
     if (this.semanticSearch) {
@@ -300,6 +371,11 @@ export class MemoryManager {
       return { result: undefined, newValue };
     });
 
+    // Update cache
+    if (this.fragmentCache) {
+      this.fragmentCache = this.fragmentCache.filter((f) => !idSet.has(f.id));
+    }
+
     // Remove from semantic search index
     if (this.semanticSearch) {
       for (const id of ids) {
@@ -347,7 +423,6 @@ export class MemoryManager {
 
     // Second pass: Jaccard similarity (only same project or global)
     for (const frag of fragments) {
-      // Skip if projects don't match (null/global fragments match everything)
       if (project !== undefined && frag.project !== project && frag.project !== null) {
         continue;
       }
@@ -360,24 +435,169 @@ export class MemoryManager {
   }
 
   /**
-   * List all fragments.
+   * List all fragments. Returns from cache if available, filtering expired.
    */
   async listFragments(options?: {
     project?: string;
     priority?: Priority;
   }): Promise<MemoryFragment[]> {
-    const raw = await this.fragmentStore.readAll();
-    let fragments = raw.map(fromRaw);
+    let fragments = await this.getAllFragments();
 
+    // Filter by project
     if (options?.project) {
       fragments = fragments.filter((f) => f.project === options.project);
     }
 
+    // Filter by priority
     if (options?.priority) {
       fragments = fragments.filter((f) => f.priority === options.priority);
     }
 
     return fragments;
+  }
+
+  /**
+   * Get all non-expired fragments from cache or storage.
+   */
+  private async getAllFragments(): Promise<MemoryFragment[]> {
+    if (this.fragmentCache) {
+      return this.filterExpired(this.fragmentCache);
+    }
+
+    const raw = await this.fragmentStore.readAll();
+    this.fragmentCache = raw.map(fromRaw);
+    return this.filterExpired(this.fragmentCache);
+  }
+
+  /**
+   * Filter out expired fragments.
+   */
+  private filterExpired(fragments: readonly MemoryFragment[]): MemoryFragment[] {
+    const now = Date.now();
+    return fragments.filter((f) => {
+      if (!f.expiresAt) return true;
+      return new Date(f.expiresAt).getTime() >= now;
+    });
+  }
+
+  /**
+   * Extract sub-facts from a large fragment.
+   * Returns additional fragments with parentFragmentId set.
+   */
+  private extractSubFacts(parent: MemoryFragment): MemoryFragment[] {
+    const wordCount = parent.fragment.split(/\s+/).length;
+    if (wordCount < AUTO_EXTRACT_MIN_WORDS) {
+      return [];
+    }
+
+    const sentences = this.splitSentences(parent.fragment);
+    if (sentences.length < 3) {
+      return [];
+    }
+
+    // Score sentences for extractability
+    const scored = sentences
+      .map((sentence, index) => ({
+        sentence,
+        score: this.scoreSubFact(sentence, index, sentences.length),
+      }))
+      .filter((s) => s.score > 2.0) // Only extract high-value sentences
+      .sort((a, b) => b.score - a.score)
+      .slice(0, AUTO_EXTRACT_MAX_SUBFACTS);
+
+    if (scored.length === 0) {
+      return [];
+    }
+
+    // Re-order by original position for coherence
+    scored.sort((a, b) => {
+      const idxA = sentences.indexOf(a.sentence);
+      const idxB = sentences.indexOf(b.sentence);
+      return idxA - idxB;
+    });
+
+    const now = new Date().toISOString();
+    return scored.map((s) => ({
+      id: this.generateId(),
+      title: this.extractTitle(s.sentence),
+      description: `Auto-extracted from: ${parent.title}`,
+      fragment: s.sentence,
+      project: parent.project,
+      priority: parent.priority as Priority,
+      confidence: parent.confidence * 0.9,
+      source: parent.source,
+      created: now,
+      lastAccessed: now,
+      accessed: 0,
+      inherits: [],
+      estimatedTokens: estimateTokensAccurate(s.sentence),
+      tags: [...parent.tags, "auto-extracted"],
+      expiresAt: parent.expiresAt,
+      parentFragmentId: parent.id,
+    }));
+  }
+
+  /**
+   * Split text into sentences.
+   */
+  private splitSentences(text: string): string[] {
+    return text
+      .split(/(?<=[.!?])\s+/)
+      .map((s) => s.trim())
+      .filter((s) => s.length > 15 && s.split(/\s+/).length >= 5);
+  }
+
+  /**
+   * Score a sentence for sub-fact extraction.
+   * Higher score = more likely to be a standalone useful fact.
+   */
+  private scoreSubFact(sentence: string, position: number, total: number): number {
+    let score = 0;
+    const lower = sentence.toLowerCase();
+
+    // Numbers and specific details are valuable
+    if (/\d+/.test(sentence)) score += 1.0;
+
+    // Bullet points are usually self-contained facts
+    if (/^[•\-*]\s/.test(sentence)) score += 1.5;
+
+    // Numbered items
+    if (/^\d+\.\s/.test(sentence)) score += 1.2;
+
+    // Contains key-value patterns
+    if (/:/.test(sentence) && !/\s+because/i.test(lower)) score += 0.8;
+
+    // Technical indicators
+    if (/[{}()[\]<>]/.test(sentence) || /\b(function|class|const|config|setting|endpoint|port|url)\b/i.test(lower)) {
+      score += 0.7;
+    }
+
+    // Contains quotes (specific values)
+    if (/"[^"]*"|`[^`]*`|'[^']*'/.test(sentence)) score += 0.5;
+
+    // Preference/pattern indicators
+    if (/\b(prefers?|always|never|must|should|requires?|uses?|supports?|needs?)\b/i.test(lower)) {
+      score += 1.0;
+    }
+
+    // Problem/solution indicators
+    if (/\b(fix|issue|bug|error|solution|resolved|cause|problem)\b/i.test(lower)) {
+      score += 1.2;
+    }
+
+    // Reasonable length (not too short, not too long)
+    const wordCount = sentence.split(/\s+/).length;
+    if (wordCount >= 8 && wordCount <= 40) score += 0.5;
+
+    // Avoid transition-only sentences
+    if (/^(now let|next we|moving on|in summary|finally|as mentioned)/i.test(lower)) {
+      score -= 3.0;
+    }
+
+    // Avoid pure questions
+    if (sentence.endsWith("?")) score -= 2.0;
+
+    return score;
   }
 
   /**
@@ -400,6 +620,15 @@ export class MemoryManager {
         return f;
       }
     );
+
+    // Update cache
+    if (this.fragmentCache) {
+      const cached = this.fragmentCache.find((f) => f.id === id);
+      if (cached) {
+        (cached as { lastAccessed: string; accessed: number }).lastAccessed = new Date().toISOString();
+        cached.accessed++;
+      }
+    }
   }
 
   /**
@@ -484,19 +713,22 @@ export class MemoryManager {
   async shutdown(): Promise<void> {
     await this.sessionManager.shutdown();
     this.storage.clearCache();
+    this.fragmentCache = null;
     logger.info("Memory manager shutdown complete");
   }
 }
 
 /**
  * Convert raw fragment to MemoryFragment.
- * Handles missing inherits/tags fields from legacy data.
+ * Handles missing inherits/tags/expiresAt/parentFragmentId fields from legacy data.
  */
 function fromRaw(raw: RawMemoryFragment): MemoryFragment {
   return {
     ...raw,
     inherits: (raw.inherits as readonly string[] | undefined) ?? [],
     tags: (raw.tags as readonly string[] | undefined) ?? [],
+    expiresAt: (raw as { expiresAt?: string | null }).expiresAt ?? null,
+    parentFragmentId: (raw as { parentFragmentId?: string | null }).parentFragmentId ?? null,
   };
 }
 
