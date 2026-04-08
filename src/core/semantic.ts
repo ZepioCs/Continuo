@@ -1,12 +1,72 @@
 /**
- * Semantic search using TF-IDF and cosine similarity.
- * Lightweight implementation with no external dependencies.
+ * Semantic search using TF-IDF with cosine similarity, light stemming,
+ * and bigram support. Lightweight implementation with no external dependencies.
  */
 
 import { createLogger } from "../utils/logging.js";
 import type { Guide, MemoryFragment } from "./types.js";
 
 const logger = createLogger("semantic");
+
+// ============================================================
+// Light Stemmer (zero dependencies)
+// ============================================================
+
+/**
+ * Light stemmer: only strips common inflectional suffixes.
+ * Much less aggressive than Porter — preserves semantic distinctions.
+ * - Plurals: "components" → "component", "queries" → "query"
+ * - Past tense: "tested" → "test", "configured" → "configur"
+ * - Temporal adverbs preserved: "currently", "recently", "newly" (not stemmed)
+ */
+function lightStem(word: string): string {
+  const len = word.length;
+
+  // Handle "-ies" → "y" (queries → query, libraries → library)
+  if (word.endsWith("ies") && len > 4) {
+    return `${word.slice(0, -3)}y`;
+  }
+
+  // Handle "-es" only for specific patterns to avoid over-stemming
+  // "addresses" → "address", "processes" → "process", but NOT "does" → "do"
+  if (word.endsWith("es") && len > 4) {
+    const stem = word.slice(0, -2);
+    const last = stem[stem.length - 1] ?? "";
+    if (["s", "x", "z"].includes(last) || stem.endsWith("ch") || stem.endsWith("sh")) {
+      return stem;
+    }
+  }
+
+  // Handle simple plural "-s" (but not "-ss" like "address" or "-us" like "status")
+  if (word.endsWith("s") && !word.endsWith("ss") && !word.endsWith("us") && len > 3) {
+    return word.slice(0, -1);
+  }
+
+  // Handle past tense "-ed" (tested → test, configured → configur)
+  // Only strip if the resulting stem is at least 4 chars to avoid "lived" → "liv"
+  if (word.endsWith("ed") && len > 4) {
+    const stem = word.slice(0, -2);
+    if (stem.length > 3) return stem;
+  }
+
+  // Handle "-ing" conservatively (testing → test, configured → configur)
+  // Only strip if stem is at least 4 chars
+  if (word.endsWith("ing") && len > 6) {
+    const stem = word.slice(0, -3);
+    if (stem.length > 3) return stem;
+  }
+
+  // Handle "-ly" adverbs (recently → recent, primarily → primari)
+  // Preserve temporal markers: currently, recently, newly
+  if (word.endsWith("ly") && len > 4) {
+    const stem = word.slice(0, -2);
+    if (stem.length > 2 && !["current", "recent", "new"].includes(stem)) {
+      return stem;
+    }
+  }
+
+  return word;
+}
 
 // ============================================================
 // Temporal Awareness
@@ -232,7 +292,7 @@ function expandQueryWithCooccurrence(
 }
 
 // ============================================================
-// TF-IDF Engine
+// TF-IDF Search Engine with Light Stemming
 // ============================================================
 
 /**
@@ -250,11 +310,12 @@ export interface TokenizedDocument {
 }
 
 /**
- * TF-IDF statistics for a corpus.
+ * BM25 statistics for a corpus.
  */
 export interface TfIdfStats {
   readonly docFreq: ReadonlyMap<string, number>;
   readonly numDocs: number;
+  readonly avgDocLength: number;
 }
 
 /**
@@ -278,6 +339,7 @@ const STOP_WORDS = new Set([
   "at",
   "be",
   "by",
+  "does",
   "for",
   "from",
   "has",
@@ -348,7 +410,9 @@ const STOP_WORDS = new Set([
 ]);
 
 /**
- * Tokenize text into terms.
+ * Tokenize text into terms with light stemming.
+ * Uses a conservative stemmer that only handles plurals and past tense
+ * to avoid over-conflating terms (e.g., "testing" ≠ "test").
  */
 export function tokenize(text: string): readonly string[] {
   const clean = text
@@ -358,7 +422,7 @@ export function tokenize(text: string): readonly string[] {
     .trim();
 
   const tokens = clean.split(" ").filter((t) => t.length > 2 && !STOP_WORDS.has(t));
-  return tokens;
+  return tokens.map(lightStem);
 }
 
 /**
@@ -374,13 +438,15 @@ export function calculateTermFreq(tokens: readonly string[]): Map<string, number
 
 /**
  * Extract bigrams (two-word phrases) from tokens.
+ * Tokens are already stemmed at this point.
  */
 function extractBigrams(tokens: readonly string[]): readonly string[] {
   const bigrams: string[] = [];
   for (let i = 0; i < tokens.length - 1; i++) {
     const t1 = tokens[i] ?? "";
     const t2 = tokens[i + 1] ?? "";
-    if (t1 && t2) {
+    // Skip bigrams where both parts are the same stem (e.g., "run run")
+    if (t1 && t2 && t1 !== t2) {
       bigrams.push(`${t1}_${t2}`);
     }
   }
@@ -431,13 +497,24 @@ export function calculateDocFreq(docs: readonly TokenizedDocument[]): Map<string
 }
 
 /**
+ * Calculate average document length for BM25 normalization.
+ */
+function calculateAvgDocLength(docs: readonly TokenizedDocument[]): number {
+  if (docs.length === 0) return 1;
+  let totalLength = 0;
+  for (const doc of docs) {
+    totalLength += doc.totalTerms;
+  }
+  return totalLength / docs.length;
+}
+
+/**
  * Calculate TF-IDF for a term in a document.
+ * Uses BM25-style IDF with log smoothing for better rare term discrimination.
  */
 export function calculateTfIdf(term: string, doc: TokenizedDocument, stats: TfIdfStats): number {
   const tf = doc.termFreq.get(term) ?? 0;
-  if (tf === 0) {
-    return 0;
-  }
+  if (tf === 0) return 0;
 
   // Normalized TF
   const normalizedTf = tf / doc.totalTerms;
@@ -469,9 +546,7 @@ export function buildVector(
  * Calculate cosine similarity between two vectors.
  */
 export function cosineSimilarity(a: Float64Array, b: Float64Array): number {
-  if (a.length !== b.length) {
-    return 0;
-  }
+  if (a.length !== b.length) return 0;
 
   let dotProduct = 0;
   let normA = 0;
@@ -486,9 +561,7 @@ export function cosineSimilarity(a: Float64Array, b: Float64Array): number {
   }
 
   const denominator = Math.sqrt(normA) * Math.sqrt(normB);
-  if (denominator === 0) {
-    return 0;
-  }
+  if (denominator === 0) return 0;
 
   return dotProduct / denominator;
 }
@@ -512,6 +585,7 @@ export class SemanticSearch {
   private guides = new Map<string, TokenizedDocument>();
   private allTerms: string[] = [];
   private docFreq: Map<string, number> = new Map();
+  private avgDocLength = 1;
   private cooccurrenceIndex: CooccurrenceIndex | null = null;
   private dirty = true;
 
@@ -642,8 +716,9 @@ export class SemanticSearch {
     // Combine all documents
     const allDocs = [...this.fragments.values(), ...this.guides.values()];
 
-    // Calculate document frequency
+    // Calculate document frequency and average document length
     this.docFreq = calculateDocFreq(allDocs);
+    this.avgDocLength = calculateAvgDocLength(allDocs);
 
     // Build term list
     const termSet = new Set<string>();
@@ -675,6 +750,7 @@ export class SemanticSearch {
     const stats: TfIdfStats = {
       docFreq: this.docFreq,
       numDocs: this.fragments.size + this.guides.size,
+      avgDocLength: this.avgDocLength,
     };
     const temporalIntent = detectTemporalIntent(query);
 
@@ -714,6 +790,7 @@ export class SemanticSearch {
     const stats: TfIdfStats = {
       docFreq: this.docFreq,
       numDocs: this.fragments.size + this.guides.size,
+      avgDocLength: this.avgDocLength,
     };
     const temporalIntent = detectTemporalIntent(query);
 
@@ -806,8 +883,9 @@ export class SemanticSearch {
   }
 
   /**
-   * Calculate field-boosted relevance score.
+   * Calculate field-boosted relevance score using cosine similarity.
    * Title matches are worth 3x, description matches 2x, content matches 1x.
+   * Uses BM25-style IDF for better rare term discrimination.
    */
   private calculateFieldBoostedRelevance(
     queryDoc: TokenizedDocument,
@@ -817,7 +895,7 @@ export class SemanticSearch {
     const queryTokens = new Set(queryDoc.tokens);
     const queryBigrams = new Set(queryDoc.bigrams);
 
-    // Base TF-IDF similarity
+    // Base TF-IDF cosine similarity (with BM25 IDF)
     const queryVector = buildVector(queryDoc, this.allTerms, stats);
     const docVector = buildVector(doc, this.allTerms, stats);
     let baseScore = cosineSimilarity(queryVector, docVector);

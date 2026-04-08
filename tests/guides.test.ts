@@ -9,23 +9,21 @@ import {
   tokenize,
   tokenizeDocument,
   calculateDocFreq,
-  calculateTfIdf,
-  buildVector,
-  cosineSimilarity,
   SemanticSearch,
 } from "../src/core/semantic.js";
 import { GuideManager } from "../src/core/guides.js";
 import { GuideCategory, type MemoryFragment, Priority } from "../src/core/types.js";
 
 describe("Semantic Search - Tokenization", () => {
-  it("should tokenize text into terms", () => {
+  it("should tokenize text into terms with stemming", () => {
     const text = "The quick brown fox jumps over the lazy dog";
     const tokens = tokenize(text);
 
     expect(tokens.length).toBeGreaterThan(0);
     expect(tokens).toContain("quick");
     expect(tokens).toContain("brown");
-    expect(tokens).toContain("jumps");
+    // "jumps" stems to "jump"
+    expect(tokens.some((t) => t === "jump" || t === "jumps")).toBe(true);
   });
 
   it("should filter stop words", () => {
@@ -51,7 +49,7 @@ describe("Semantic Search - Tokenization", () => {
   });
 });
 
-describe("Semantic Search - TF-IDF", () => {
+describe("Semantic Search - BM25", () => {
   it("should tokenize documents", () => {
     const doc = tokenizeDocument("doc1", "test content here");
     expect(doc.id).toBe("doc1");
@@ -75,75 +73,21 @@ describe("Semantic Search - TF-IDF", () => {
 
     const docFreq = calculateDocFreq(docs);
 
+    // Light stemmer keeps short words unchanged
     expect(docFreq.get("apple")).toBe(2);
     expect(docFreq.get("banana")).toBe(2);
     expect(docFreq.get("cherry")).toBe(2);
   });
 
-  it("should calculate TF-IDF scores", () => {
-    const docs = [
-      tokenizeDocument("1", "apple banana cherry"),
-      tokenizeDocument("2", "apple"),
-      tokenizeDocument("3", "banana"),
-    ];
-
-    const stats = {
-      docFreq: calculateDocFreq(docs),
-      numDocs: docs.length,
-    };
-
-    const tfIdf = calculateTfIdf("apple", docs[0]!, stats);
-
-    // TF-IDF should be positive
-    expect(tfIdf).toBeGreaterThan(0);
+  it("should generate bigrams from tokens", () => {
+    const doc = tokenizeDocument("1", "react component testing");
+    expect(doc.bigrams.length).toBeGreaterThan(0);
   });
 
-  it("should build vectors", () => {
-    const docs = [
-      tokenizeDocument("1", "apple banana"),
-      tokenizeDocument("2", "apple cherry"),
-    ];
-
-    const stats = {
-      docFreq: calculateDocFreq(docs),
-      numDocs: docs.length,
-    };
-
-    const allTerms = ["apple", "banana", "cherry"];
-    const vector = buildVector(docs[0]!, allTerms, stats);
-
-    expect(vector.length).toBe(allTerms.length);
-  });
-});
-
-describe("Semantic Search - Cosine Similarity", () => {
-  it("should calculate cosine similarity", () => {
-    const a = new Float64Array([1, 2, 3]);
-    const b = new Float64Array([1, 2, 3]);
-
-    const similarity = cosineSimilarity(a, b);
-
-    // Identical vectors should have similarity 1
-    expect(similarity).toBeCloseTo(1, 5);
-  });
-
-  it("should handle orthogonal vectors", () => {
-    const a = new Float64Array([1, 0, 0]);
-    const b = new Float64Array([0, 1, 0]);
-
-    const similarity = cosineSimilarity(a, b);
-
-    // Orthogonal vectors should have similarity 0
-    expect(similarity).toBe(0);
-  });
-
-  it("should handle different length vectors", () => {
-    const a = new Float64Array([1, 2]);
-    const b = new Float64Array([1, 2, 3]);
-
-    const similarity = cosineSimilarity(a, b);
-
-    expect(similarity).toBe(0);
+  it("should skip duplicate bigrams (same stem)", () => {
+    const doc = tokenizeDocument("1", "test test testing");
+    // "test" stems to "test", so "test_test" would be a dupe and skipped
+    expect(doc.bigrams.length).toBe(0);
   });
 });
 

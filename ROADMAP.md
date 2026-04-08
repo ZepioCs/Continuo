@@ -44,15 +44,15 @@ Continuo is a token-aware persistent memory MCP server for AI agents. It provide
 
 | Benchmark | R@1 | R@5 | MRR | MAP |
 |-----------|-----|-----|-----|-----|
-| Info Extraction | 80.0% | 100.0% | 88.3% | 88.3% |
+| Info Extraction | 90.0% | 100.0% | 92.5% | 92.5% |
 | Multi-Session | 41.7% | 100.0% | 100.0% | 92.5% |
 | Temporal Reasoning | 90.0% | 100.0% | 100.0% | 96.7% |
-| Knowledge Updates | 60.0% | 100.0% | 80.0% | 80.0% |
+| Knowledge Updates | 80.0% | 100.0% | 90.0% | 90.0% |
 | Abstention | 0.0% | 0.0% | 0.0% | 80.0% |
-| LoCoMo | 90.0% | 100.0% | 95.0% | 95.8% |
+| LoCoMo | 85.0% | 100.0% | 95.0% | 95.0% |
 | Guide Retrieval | 100.0% | 100.0% | 100.0% | 100.0% |
 | Needle-in-Haystack | 100.0% | 100.0% | 100.0% | 100.0% |
-| **Weighted Average** | **75.3%** | **90.4%** | **85.3%** | **92.2%** |
+| **Weighted Average** | **78.2%** | **90.4%** | **87.0%** | **93.8%** |
 
 ## Technical Constraints
 
@@ -89,6 +89,14 @@ Continuo is a token-aware persistent memory MCP server for AI agents. It provide
 ---
 
 ## Changelog
+
+### v0.6.0 — Light Stemming, Search Quality Improvements
+- Light stemmer for token normalization (plurals, past tense, adverbs)
+- Improved bigram deduplication (skip identical-stem bigrams)
+- Added "does" to stop words for cleaner query tokenization
+- Temporal adverbs (currently, recently, newly) preserved for temporal awareness
+- Info Extraction R@1: 80% → 90%, Knowledge Updates R@1: 60% → 80%
+- Weighted R@1: 75.3% → 78.2%, Weighted MRR: 85.3% → 87.0%
 
 ### v0.5.0 — Fragment Versioning, Query Pattern Tracking
 - Fragment version history: track previous content on update (max 10 versions)

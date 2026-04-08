@@ -39,7 +39,7 @@ AI assistants lose context between conversations. RAG systems retrieve irrelevan
 
 ## Search Engine
 
-TF-IDF with cosine similarity, augmented with three techniques:
+TF-IDF with cosine similarity and light stemming, augmented with three techniques:
 
 ### Temporal Awareness
 
@@ -59,15 +59,15 @@ Evaluated against LongMemEval (ICLR 2025) and LoCoMo (ACL 2024) retrieval tracks
 
 | Benchmark | Metric | Score |
 |-----------|--------|-------|
-| LongMemEval: Information Extraction | R@1 | 80.0% |
+| LongMemEval: Information Extraction | R@1 | 90.0% |
 | LongMemEval: Multi-Session Reasoning | R@5 | 100.0% |
 | LongMemEval: Temporal Reasoning | R@1 | 90.0% |
-| LongMemEval: Knowledge Updates | R@1 | 60.0% |
+| LongMemEval: Knowledge Updates | R@1 | 80.0% |
 | LongMemEval: Abstention | MAP | 80.0% |
-| LoCoMo: Long Conversational Memory | R@1 | 90.0% |
+| LoCoMo: Long Conversational Memory | R@1 | 85.0% |
 | Guide Retrieval: Procedural Knowledge | R@1 | 100.0% |
 | Needle-in-a-Haystack (100+ corpus) | R@1 | 100.0% |
-| **Weighted Average** | **R@1** | **75.3%** |
+| **Weighted Average** | **R@1** | **78.2%** |
 
 Reference: LongMemEval reports BM25 retrieval R@5 at ~65-75% (session-level) and dense retrieval R@5 at ~70-80%.
 
