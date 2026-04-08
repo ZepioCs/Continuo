@@ -215,6 +215,7 @@ export class ContextSelector {
 
   /**
    * Select fragments within token budget.
+   * Priority multipliers: critical=free, high=50% cost, normal=100%, low=200% cost.
    */
   private selectWithinBudget(
     fragments: readonly MemoryFragment[],
@@ -234,9 +235,15 @@ export class ContextSelector {
       const score = this.prioritizer.calculateScore(fragment);
       const fragmentTokens = fragment.estimatedTokens ?? estimateTokensAccurate(fragment.fragment);
 
-      // Critical fragments are always included
+      // Critical fragments are always included, high get 50% discount, low cost 200%
       const isCritical = this.prioritizer.isCritical(fragment);
-      const effectiveCost = isCritical ? 0 : fragmentTokens;
+      const effectiveCost = isCritical
+        ? 0
+        : fragment.priority === "high"
+          ? Math.ceil(fragmentTokens * 0.5)
+          : fragment.priority === "low"
+            ? Math.ceil(fragmentTokens * 2)
+            : fragmentTokens;
 
       if (usedTokens + effectiveCost <= budget.total || isCritical) {
         selected.push(fragment);

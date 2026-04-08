@@ -102,7 +102,7 @@ export class Prioritizer {
       };
     }
 
-    const confidence = fragment.confidence;
+    const confidence = this.applyConfidenceDecay(fragment);
     const priority = PRIORITY_VALUES[fragment.priority] ?? 1;
     const recency = this.calculateRecency(fragment);
     const relevance = query ? this.calculateRelevance(fragment, query) : 0.5;
@@ -131,16 +131,32 @@ export class Prioritizer {
   }
 
   /**
+   * Apply confidence decay based on age since last access.
+   * Fragments not accessed in 30+ days lose confidence gradually.
+   */
+  private applyConfidenceDecay(fragment: MemoryFragment): number {
+    const ageDays = (Date.now() - new Date(fragment.lastAccessed).getTime()) / 86400000;
+
+    if (ageDays < 30) return fragment.confidence;
+
+    // Start decaying after 30 days of no access
+    const decayDays = ageDays - 30;
+    const decayFactor = Math.exp(-decayDays / 90); // Half-life of 90 days after initial grace period
+    return Math.max(fragment.confidence * decayFactor, 0.05); // Floor at 0.05
+  }
+
+  /**
    * Calculate recency score (exponential decay).
    * Returns 1 for very recent, approaching 0 for old.
+   * Uses faster decay for low-priority fragments (simulates forgetting).
    */
   private calculateRecency(fragment: MemoryFragment): number {
     const now = Date.now();
     const accessed = new Date(fragment.lastAccessed).getTime();
     const ageHours = (now - accessed) / (1000 * 60 * 60);
 
-    // Decay with half-life of 24 hours
-    const halfLife = 24;
+    // Lower priority fragments decay faster (forgetting curve)
+    const halfLife = fragment.priority === "low" ? 72 : fragment.priority === "normal" ? 48 : 24;
     return Math.pow(0.5, ageHours / halfLife);
   }
 

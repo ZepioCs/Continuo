@@ -142,13 +142,40 @@ const TOOLS = [
   },
   {
     name: "memory_compress",
-    description: "Compress low-priority fragments to save tokens",
+    description: "Compress low-priority fragments to save tokens. Originals are backed up and can be restored with memory_undo.",
     inputSchema: {
       type: "object",
       properties: {
         project: { type: "string", description: "Filter by project" },
         maxFragments: { type: "number", description: "Maximum fragments to compress (default 10)" },
       },
+    },
+  },
+  {
+    name: "memory_undo",
+    description: "Restore the most recently compressed fragments from backup",
+    inputSchema: {
+      type: "object",
+      properties: {},
+    },
+  },
+  {
+    name: "memory_export",
+    description: "Export all fragments as JSON for backup or migration",
+    inputSchema: {
+      type: "object",
+      properties: {},
+    },
+  },
+  {
+    name: "memory_import",
+    description: "Import fragments from a previously exported JSON backup",
+    inputSchema: {
+      type: "object",
+      properties: {
+        data: { type: "string", description: "JSON string of exported fragments" },
+      },
+      required: ["data"],
     },
   },
   {
@@ -420,6 +447,12 @@ export function registerServerToolHandlers(
           return await handleMemoryList(manager, args as unknown as ListArgs);
         case "memory_compress":
           return await handleMemoryCompress(manager, args as unknown as CompressArgs);
+        case "memory_undo":
+          return await handleMemoryUndo(manager);
+        case "memory_export":
+          return await handleMemoryExport(manager);
+        case "memory_import":
+          return await handleMemoryImport(manager, args as { data: string });
         case "memory_stats":
           return await handleMemoryStats(manager);
         case "memory_extract":
@@ -497,7 +530,13 @@ export function registerServerToolHandlers(
  * Handle memory_read tool.
  */
 async function handleMemoryRead(manager: MemoryManager, args: ContextRequest) {
-  const result = await manager.selectContext(args);
+  // Enable project inheritance when a specific project is requested
+  const contextRequest: ContextRequest = {
+    ...args,
+    includeInherited: args.project ? true : undefined,
+    includeGlobal: args.project ? true : undefined,
+  };
+  const result = await manager.selectContext(contextRequest);
 
   // Update session activity if provided
   if (args.sessionId) {
@@ -804,6 +843,289 @@ async function handleMemoryStats(manager: MemoryManager) {
       {
         type: "text",
         text: JSON.stringify(stats, null, 2),
+      },
+    ],
+  };
+}
+
+/**
+ * Compression backup store (in-memory, per server instance).
+ */
+let compressionBackup: Array<{
+  compressedId: string;
+  originals: Array<{ id: string; title: string; fragment: string; priority: string; confidence: number; project: string | null; tags: readonly string[]; estimatedTokens: number; source: string; created: string; lastAccessed: string; accessed: number; inherits: string[]; expiresAt: string | null; parentFragmentId: string | null }>;
+}> = [];
+
+/**
+ * Handle memory_compress tool — with backup.
+ */
+async function handleMemoryCompress(manager: MemoryManager, args: CompressArgs) {
+  const maxFragments = args.maxFragments ?? 10;
+
+  const listOptions = args.project !== undefined ? { project: args.project } : undefined;
+  let fragments = listOptions
+    ? await manager.listFragments(listOptions)
+    : await manager.listFragments();
+
+  // Filter for low/normal priority fragments that can be compressed
+  fragments = fragments.filter((f) => f.priority === "low" || f.priority === "normal");
+
+  if (fragments.length < 2) {
+    return {
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify(
+            { message: "Not enough fragments to compress (need at least 2)" },
+            null,
+            2
+          ),
+        },
+      ],
+    };
+  }
+
+  // Take the oldest accessed fragments
+  const toCompress = fragments
+    .sort((a, b) => new Date(a.lastAccessed).getTime() - new Date(b.lastAccessed).getTime())
+    .slice(0, maxFragments);
+
+  // Backup originals before compression
+  const backup = toCompress.map((f) => ({
+    id: f.id,
+    title: f.title,
+    fragment: f.fragment,
+    priority: f.priority,
+    confidence: f.confidence,
+    project: f.project,
+    tags: f.tags,
+    estimatedTokens: f.estimatedTokens,
+    source: f.source,
+    created: f.created,
+    lastAccessed: f.lastAccessed,
+    accessed: f.accessed,
+    inherits: [...f.inherits],
+    expiresAt: f.expiresAt,
+    parentFragmentId: f.parentFragmentId,
+  }));
+
+  const result = defaultCompressor.compress(toCompress);
+
+  // Add compressed fragment and remove originals
+  const addParams: MemoryAddParams = {
+    fragment: result.compressed.fragment,
+    title: result.compressed.title,
+    description: result.compressed.description,
+    priority: result.compressed.priority,
+    tags: [...result.compressed.tags, "compressed"],
+  };
+  if (result.compressed.project !== null) {
+    (addParams as { project?: string }).project = result.compressed.project;
+  }
+  await manager.add(addParams);
+
+  for (const f of toCompress) {
+    await manager.delete(f.id);
+  }
+
+  // Store backup for undo
+  compressionBackup.push({
+    compressedId: result.compressed.id,
+    originals: backup,
+  });
+
+  return {
+    content: [
+      {
+        type: "text",
+        text: JSON.stringify(
+          {
+            message: `Compressed ${result.originalCount} fragments into 1`,
+            compressedId: result.compressed.id,
+            tokensSaved: result.tokensSaved,
+            canUndo: true,
+          },
+          null,
+          2
+        ),
+      },
+    ],
+  };
+}
+
+/**
+ * Handle memory_undo tool — restore last compression.
+ */
+async function handleMemoryUndo(manager: MemoryManager) {
+  if (compressionBackup.length === 0) {
+    return {
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify({ error: "No compression to undo" }, null, 2),
+        },
+      ],
+      isError: true,
+    };
+  }
+
+  const backup = compressionBackup.pop()!;
+  const restored: string[] = [];
+
+  // Delete the compressed fragment
+  await manager.delete(backup.compressedId);
+
+  // Restore all originals
+  for (const original of backup.originals) {
+    await manager.add({
+      fragment: original.fragment,
+      title: original.title,
+      project: original.project ?? undefined,
+      priority: original.priority as Priority,
+      confidence: original.confidence,
+      tags: original.tags,
+      ttl: original.expiresAt
+        ? Math.max(0, (new Date(original.expiresAt).getTime() - Date.now()) / 86400000)
+        : undefined,
+    });
+    restored.push(original.id);
+  }
+
+  return {
+    content: [
+      {
+        type: "text",
+        text: JSON.stringify(
+          {
+            message: `Restored ${restored.length} fragments from compression backup`,
+            restoredIds: restored,
+            deletedCompressedId: backup.compressedId,
+            remainingBackups: compressionBackup.length,
+          },
+          null,
+          2
+        ),
+      },
+    ],
+  };
+}
+
+/**
+ * Handle memory_export tool.
+ */
+async function handleMemoryExport(manager: MemoryManager) {
+  const fragments = await manager.listFragments();
+
+  const exportData = {
+    version: 1,
+    exportedAt: new Date().toISOString(),
+    fragmentCount: fragments.length,
+    fragments: fragments.map((f) => ({
+      id: f.id,
+      title: f.title,
+      description: f.description,
+      fragment: f.fragment,
+      project: f.project,
+      priority: f.priority,
+      confidence: f.confidence,
+      source: f.source,
+      created: f.created,
+      lastAccessed: f.lastAccessed,
+      accessed: f.accessed,
+      inherits: [...f.inherits],
+      estimatedTokens: f.estimatedTokens,
+      tags: [...f.tags],
+      expiresAt: f.expiresAt,
+      parentFragmentId: f.parentFragmentId,
+    })),
+  };
+
+  return {
+    content: [
+      {
+        type: "text",
+        text: JSON.stringify(exportData),
+      },
+    ],
+  };
+}
+
+/**
+ * Handle memory_import tool.
+ */
+async function handleMemoryImport(manager: MemoryManager, args: { data: string }) {
+  let importData: unknown;
+  try {
+    importData = JSON.parse(args.data);
+  } catch {
+    return {
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify({ error: "Invalid JSON data" }, null, 2),
+        },
+      ],
+      isError: true,
+    };
+  }
+
+  const data = importData as {
+    version?: number;
+    fragments?: unknown[];
+  };
+
+  if (!Array.isArray(data.fragments)) {
+    return {
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify({ error: "Missing 'fragments' array in import data" }, null, 2),
+        },
+      ],
+      isError: true,
+    };
+  }
+
+  const imported: string[] = [];
+  const skipped: string[] = [];
+
+  for (const item of data.fragments) {
+    const f = item as Record<string, unknown>;
+    const fragment = f["fragment"];
+    if (typeof fragment !== "string" || !fragment.trim()) {
+      skipped.push(String(f["id"] ?? "unknown"));
+      continue;
+    }
+
+    try {
+      const result = await manager.add({
+        fragment,
+        title: typeof f["title"] === "string" ? f["title"] : undefined,
+        description: typeof f["description"] === "string" ? f["description"] : undefined,
+        project: typeof f["project"] === "string" ? f["project"] : undefined,
+        priority: typeof f["priority"] === "string" ? f["priority"] as Priority : undefined,
+        confidence: typeof f["confidence"] === "number" ? f["confidence"] : undefined,
+        tags: Array.isArray(f["tags"]) ? (f["tags"] as string[]).filter((t: unknown) => typeof t === "string") : undefined,
+      });
+      imported.push(result.id);
+    } catch {
+      skipped.push(String(f["id"] ?? "unknown"));
+    }
+  }
+
+  return {
+    content: [
+      {
+        type: "text",
+        text: JSON.stringify(
+          {
+            message: `Imported ${imported.length} fragments (${skipped.length} skipped)`,
+            importedIds: imported,
+            skippedIds: skipped,
+          },
+          null,
+          2
+        ),
       },
     ],
   };
